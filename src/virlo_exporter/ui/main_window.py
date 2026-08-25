@@ -47,9 +47,15 @@ from virlo_exporter.storage.database import Database
 from virlo_exporter.storage.key_store import ApiKeyStore
 from virlo_exporter.utils.files import open_in_explorer
 
-from .components import AgentEditorDialog, CollapsibleSection, NewResearchDialog, ensure_visible
+from .components import (
+    AgentEditorDialog,
+    CollapsibleSection,
+    NewResearchDialog,
+    RenameDialog,
+    ensure_visible,
+)
 from .dialogs import ApiKeyDialog, PaidConfirmationDialog, SettingsDialog, show_error
-from .logic import agent_display_status, run_timestamp
+from .logic import agent_display_status, research_search_text, run_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -116,13 +122,13 @@ class NaturalListWidget(QListWidget):
 
 
 class AgentRow(QFrame):
-    def __init__(self, agent: Agent, status: str, on_edit: Any) -> None:
+    def __init__(self, agent: Agent, status: str, on_edit: Any, on_rename: Any) -> None:
         super().__init__()
         self.setObjectName("sidebarRow")
         self.setProperty("selected", False)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 7, 5, 7)
-        layout.setSpacing(5)
+        layout.setSpacing(2)
         text = QVBoxLayout()
         text.setSpacing(1)
         name = QLabel(agent.name)
@@ -134,13 +140,72 @@ class AgentRow(QFrame):
         secondary.setObjectName("muted")
         text.addWidget(name)
         text.addWidget(secondary)
+        pencil = QToolButton()
+        pencil.setObjectName("pencilButton")
+        pencil.setText("✎")
+        pencil.setToolTip(f"Rename {agent.name}")
+        pencil.clicked.connect(on_rename)
         gear = QToolButton()
         gear.setObjectName("gearButton")
         gear.setText("⚙")
         gear.setToolTip(f"Edit {agent.name}")
         gear.clicked.connect(on_edit)
         layout.addLayout(text, 1)
+        layout.addWidget(pencil)
         layout.addWidget(gear)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
+class ResearchRow(QFrame):
+    def __init__(self, title_text: str, secondary_text: str, on_rename: Any) -> None:
+        super().__init__()
+        self.setObjectName("sidebarRow")
+        self.setProperty("selected", False)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 7, 5, 7)
+        layout.setSpacing(2)
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        title = QLabel(title_text)
+        title.setObjectName("rowTitle")
+        title.setToolTip(title_text)
+        secondary = QLabel(secondary_text)
+        secondary.setObjectName("muted")
+        text.addWidget(title)
+        text.addWidget(secondary)
+        pencil = QToolButton()
+        pencil.setObjectName("pencilButton")
+        pencil.setText("✎")
+        pencil.setToolTip("Rename research")
+        pencil.clicked.connect(on_rename)
+        layout.addLayout(text, 1)
+        layout.addWidget(pencil)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
+class ProcessRow(QFrame):
+    def __init__(self, title_text: str, secondary_text: str) -> None:
+        super().__init__()
+        self.setObjectName("sidebarRow")
+        self.setProperty("selected", False)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setSpacing(1)
+        title = QLabel(f"● {title_text}")
+        title.setObjectName("rowTitle")
+        title.setToolTip(title_text)
+        secondary = QLabel(secondary_text)
+        secondary.setObjectName("muted")
+        layout.addWidget(title)
+        layout.addWidget(secondary)
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
@@ -166,6 +231,7 @@ class MainWindow(QMainWindow):
         self.agents: dict[str, Agent] = {}
         self.runs: dict[str, list[Run]] = {}
         self.selected_agent_id: str | None = None
+        self._current_page: tuple[Any, ...] = ("empty",)
         self.active_workers: set[Worker] = set()
         self.export_cancel: Event | None = None
         self._runs_loading = False
@@ -250,24 +316,30 @@ class MainWindow(QMainWindow):
         self.agents_section.body_layout.addWidget(self.agent_list)
         side.addWidget(self.agents_section)
 
-        self.processes_section = CollapsibleSection("ACTIVE PROCESSES")
-        self.process_list = NaturalListWidget()
-        self.process_list.itemClicked.connect(self._process_selected)
-        self.processes_section.body_layout.addWidget(self.process_list)
-        side.addWidget(self.processes_section)
-
         new_research = QPushButton("+ New Research")
         new_research.clicked.connect(self.show_new_research)
         self.research_section = CollapsibleSection("RESEARCH", new_research)
+        self.research_search = QLineEdit()
+        self.research_search.setPlaceholderText("Search research…")
+        self.research_search.textChanged.connect(self._filter_research)
         self.research_list = NaturalListWidget()
+        self.research_list.setObjectName("researchSidebarList")
         self.research_list.itemClicked.connect(self._research_selected)
         self.view_all_research = QPushButton("View all")
         self.view_all_research.setObjectName("linkButton")
         self.view_all_research.clicked.connect(self.show_all_research)
         self.view_all_research.hide()
+        self.research_section.body_layout.addWidget(self.research_search)
         self.research_section.body_layout.addWidget(self.research_list)
         self.research_section.body_layout.addWidget(self.view_all_research)
         side.addWidget(self.research_section)
+
+        self.processes_section = CollapsibleSection("ACTIVE PROCESSES")
+        self.process_list = NaturalListWidget()
+        self.process_list.setObjectName("processSidebarList")
+        self.process_list.itemClicked.connect(self._process_selected)
+        self.processes_section.body_layout.addWidget(self.process_list)
+        side.addWidget(self.processes_section)
         side.addStretch()
         side_scroll.setWidget(side_body)
         sidebar_layout.addWidget(side_scroll)
@@ -286,8 +358,8 @@ class MainWindow(QMainWindow):
 
         section_settings = (
             (self.agents_section, "ui/sidebar/agents_expanded"),
-            (self.processes_section, "ui/sidebar/processes_expanded"),
             (self.research_section, "ui/sidebar/research_expanded"),
+            (self.processes_section, "ui/sidebar/processes_expanded"),
         )
         for section, key in section_settings:
             section.set_expanded(self.ui_settings.value(key, True, type=bool))
@@ -460,6 +532,19 @@ class MainWindow(QMainWindow):
             self._populate_research()
             self.statusBar().showMessage("Showing cached data — connect Virlo to refresh")
 
+    def _restore_current_page(self) -> None:
+        kind = self._current_page[0]
+        if kind == "agent":
+            _, agent_id = self._current_page
+            if agent_id in self.agents:
+                self.show_agent(agent_id)
+        elif kind == "run":
+            _, agent_id, run_id = self._current_page
+            agent = self.agents.get(agent_id)
+            run = next((value for value in self.runs.get(agent_id, []) if value.id == run_id), None)
+            if agent and run:
+                self.show_run(agent, run)
+
     def _populate_agents(self, records: list[dict[str, Any]]) -> None:
         current = self.selected_agent_id
         self.agents = {
@@ -468,8 +553,7 @@ class MainWindow(QMainWindow):
         self._render_agent_list(current)
         self._populate_processes()
         self._populate_research()
-        if current and current in self.agents:
-            self.show_agent(current)
+        self._restore_current_page()
 
     def _render_agent_list(self, current: str | None = None) -> None:
         current = current or self.selected_agent_id
@@ -485,7 +569,12 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, agent.id)
             item.setSizeHint(QSize(230, 64))
-            row = AgentRow(agent, status, lambda _=False, value=agent: self.edit_agent(value))
+            row = AgentRow(
+                agent,
+                status,
+                lambda _=False, value=agent: self.edit_agent(value),
+                lambda _=False, value=agent: self.quick_rename_agent(value),
+            )
             self.agent_list.addItem(item)
             self.agent_list.setItemWidget(item, row)
             if agent.id == current:
@@ -513,6 +602,8 @@ class MainWindow(QMainWindow):
                 row.set_selected(item is current)
 
     def _populate_processes(self) -> None:
+        current = self.process_list.currentItem()
+        current_key = current.data(Qt.ItemDataRole.UserRole) if current else None
         self.process_list.clear()
         for agent in self.agents.values():
             if agent.is_processing:
@@ -531,23 +622,44 @@ class MainWindow(QMainWindow):
                 number = (
                     f" #{active_run.local_number:03d}" if active_run and active_run.local_number else ""
                 )
-                item = QListWidgetItem(f"● Research{number} · {agent.name}\n   {phase}")
-                item.setData(Qt.ItemDataRole.UserRole, {"kind": "server", "agent_id": agent.id})
+                key = {"kind": "server", "agent_id": agent.id}
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, key)
                 item.setSizeHint(QSize(220, 62))
+                row = ProcessRow(f"Research{number} · {agent.name}", phase)
                 self.process_list.addItem(item)
+                self.process_list.setItemWidget(item, row)
+                if key == current_key:
+                    self.process_list.setCurrentItem(item)
         for process in self.database.active_processes():
-            item = QListWidgetItem(
-                f"● {process['label']}\n   {str(process['status']).replace('_', ' ').title()}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, {"kind": "local", **process})
+            key = {"kind": "local", "process_id": process["process_id"]}
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, {**key, **process})
             item.setSizeHint(QSize(220, 62))
+            payload = process.get("payload") if isinstance(process.get("payload"), dict) else {}
+            secondary = str(payload.get("stage") or process["status"]).replace("_", " ").title()
+            if isinstance(payload.get("percent"), (int, float)):
+                secondary = f"{secondary} · {int(payload['percent'])}%"
+            row = ProcessRow(process["label"], secondary)
             self.process_list.addItem(item)
+            self.process_list.setItemWidget(item, row)
+            if key == current_key:
+                self.process_list.setCurrentItem(item)
         if self.process_list.count() == 0:
             item = QListWidgetItem("No active processes")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             item.setSizeHint(QSize(220, 36))
             self.process_list.addItem(item)
         self.process_list.sync_height()
+        self._sync_process_row_selection()
+
+    def _sync_process_row_selection(self) -> None:
+        current = self.process_list.currentItem()
+        for index in range(self.process_list.count()):
+            item = self.process_list.item(index)
+            row = self.process_list.itemWidget(item)
+            if isinstance(row, ProcessRow):
+                row.set_selected(item is current)
 
     def _all_research(self) -> list[tuple[Agent, Run]]:
         values = [
@@ -559,26 +671,109 @@ class MainWindow(QMainWindow):
         return sorted(values, key=lambda value: run_timestamp(value[1]), reverse=True)
 
     def _populate_research(self) -> None:
+        current = self.research_list.currentItem()
+        current_key = current.data(Qt.ItemDataRole.UserRole) if current else None
         self.research_list.clear()
         research = self._all_research()
         for agent, run in research[:RECENT_RESEARCH_LIMIT]:
             number = run.local_number or 0
-            item = QListWidgetItem(
-                f"Research #{number:03d} · {agent.name}\n"
-                f"{compact_date(run_timestamp(run))} · {run.status.replace('_', ' ').title()}"
+            display_name = self.database.research_display_name(agent.id, run.id)
+            if display_name:
+                title = display_name
+                secondary = f"Research #{number:03d} · {agent.name} · {compact_date(run_timestamp(run))}"
+            else:
+                title = f"Research #{number:03d}"
+                secondary = f"{agent.name} · {compact_date(run_timestamp(run))}"
+            key = {"agent_id": agent.id, "run_id": run.id}
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setData(Qt.ItemDataRole.UserRole + 1, research_search_text(agent.name, run, display_name))
+            item.setSizeHint(QSize(220, 62))
+            row = ResearchRow(
+                title,
+                secondary,
+                lambda _=False, a=agent, r=run: self.rename_research(a, r),
             )
-            item.setData(
-                Qt.ItemDataRole.UserRole, {"agent_id": agent.id, "run_id": run.id}
-            )
-            item.setSizeHint(QSize(220, 66))
             self.research_list.addItem(item)
+            self.research_list.setItemWidget(item, row)
+            if key == current_key:
+                self.research_list.setCurrentItem(item)
         if not research:
             item = QListWidgetItem("No research runs yet")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             item.setSizeHint(QSize(220, 36))
             self.research_list.addItem(item)
         self.view_all_research.setVisible(len(research) > RECENT_RESEARCH_LIMIT)
+        self._filter_research(self.research_search.text())
         self.research_list.sync_height()
+        self._sync_research_row_selection()
+
+    def _filter_research(self, text: str) -> None:
+        query = text.casefold().strip()
+        for index in range(self.research_list.count()):
+            item = self.research_list.item(index)
+            haystack = item.data(Qt.ItemDataRole.UserRole + 1)
+            if haystack is None:
+                continue
+            item.setHidden(bool(query) and query not in haystack)
+        self.research_list.sync_height()
+
+    def _sync_research_row_selection(self) -> None:
+        current = self.research_list.currentItem()
+        for index in range(self.research_list.count()):
+            item = self.research_list.item(index)
+            row = self.research_list.itemWidget(item)
+            if isinstance(row, ResearchRow):
+                row.set_selected(item is current)
+
+    def _select_research_item(self, agent_id: str, run_id: str) -> None:
+        for index in range(self.research_list.count()):
+            item = self.research_list.item(index)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict) and data.get("agent_id") == agent_id and data.get("run_id") == run_id:
+                self.research_list.blockSignals(True)
+                self.research_list.setCurrentItem(item)
+                self.research_list.blockSignals(False)
+                self._sync_research_row_selection()
+                return
+        self.research_list.blockSignals(True)
+        self.research_list.setCurrentItem(None)
+        self.research_list.blockSignals(False)
+        self._sync_research_row_selection()
+
+    def _select_process_item(self, key: dict[str, Any] | None) -> None:
+        self.process_list.blockSignals(True)
+        if key is None:
+            self.process_list.setCurrentItem(None)
+        else:
+            for index in range(self.process_list.count()):
+                item = self.process_list.item(index)
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get("kind") == key.get("kind") and (
+                    data.get("agent_id") == key.get("agent_id")
+                    or data.get("process_id") == key.get("process_id")
+                ):
+                    self.process_list.setCurrentItem(item)
+                    break
+            else:
+                self.process_list.setCurrentItem(None)
+        self.process_list.blockSignals(False)
+        self._sync_process_row_selection()
+
+    def _clear_agent_selection(self) -> None:
+        self.agent_list.blockSignals(True)
+        self.agent_list.setCurrentItem(None)
+        self.agent_list.blockSignals(False)
+        self._sync_agent_row_selection()
+
+    def _clear_research_selection(self) -> None:
+        self.research_list.blockSignals(True)
+        self.research_list.setCurrentItem(None)
+        self.research_list.blockSignals(False)
+        self._sync_research_row_selection()
+
+    def _clear_process_selection(self) -> None:
+        self._select_process_item(None)
 
     def _load_all_runs(self) -> None:
         if not self.client or self._runs_loading or not self.agents:
@@ -601,8 +796,7 @@ class MainWindow(QMainWindow):
                 self.runs[agent_id] = values
             self._render_agent_list()
             self._populate_research()
-            if self.selected_agent_id in self.agents:
-                self.show_agent(str(self.selected_agent_id))
+            self._restore_current_page()
 
         self._run_worker(
             fetch,
@@ -630,8 +824,7 @@ class MainWindow(QMainWindow):
             self.runs[agent_id] = values
             self._render_agent_list()
             self._populate_research()
-            if self.selected_agent_id == agent_id:
-                self.show_agent(agent_id)
+            self._restore_current_page()
 
         self._run_worker(fetch, loaded, label="Loading research runs…")
 
@@ -655,8 +848,6 @@ class MainWindow(QMainWindow):
             None,
         )
         if agent and run:
-            self.selected_agent_id = agent.id
-            self._select_agent_item(agent.id)
             self.show_run(agent, run)
 
     def _select_agent_item(self, agent_id: str) -> None:
@@ -671,6 +862,10 @@ class MainWindow(QMainWindow):
 
     def show_agent(self, agent_id: str) -> None:
         self.selected_agent_id = agent_id
+        self._current_page = ("agent", agent_id)
+        self._select_agent_item(agent_id)
+        self._clear_research_selection()
+        self._clear_process_selection()
         agent = self.agents[agent_id]
         known_runs = self.runs.get(agent_id)
         page = QWidget()
@@ -835,6 +1030,11 @@ class MainWindow(QMainWindow):
         return frame
 
     def show_run(self, agent: Agent, run: Run) -> None:
+        self.selected_agent_id = agent.id
+        self._current_page = ("run", agent.id, run.id)
+        self._clear_agent_selection()
+        self._select_research_item(agent.id, run.id)
+        self._clear_process_selection()
         page = QWidget()
         root = QVBoxLayout(page)
         root.setContentsMargins(28, 24, 28, 24)
@@ -1022,6 +1222,34 @@ class MainWindow(QMainWindow):
             label=f"{action.title()}ing Agent…",
         )
 
+    def quick_rename_agent(self, agent: Agent) -> None:
+        if not self.client:
+            return
+        dialog = RenameDialog("Rename Agent", agent.name, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_name = dialog.value()
+        client = self.client
+        self._run_worker(
+            lambda: client.update_agent(agent.id, {"name": new_name}),
+            lambda _result: self.refresh(),
+            label="Renaming Agent…",
+        )
+
+    def rename_research(self, agent: Agent, run: Run) -> None:
+        current_name = self.database.research_display_name(agent.id, run.id) or (
+            f"Research #{(run.local_number or 0):03d}"
+        )
+        dialog = RenameDialog(
+            "Rename Research", current_name, self, context=f"{agent.name} · local name only"
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.database.rename_research(agent.id, run.id, dialog.value())
+        self._populate_research()
+        if self._current_page[:1] == ("run",) and self._current_page[1:] == (agent.id, run.id):
+            self.show_run(agent, run)
+
     def edit_agent(self, agent: Agent) -> None:
         if not self.client:
             return
@@ -1079,6 +1307,10 @@ class MainWindow(QMainWindow):
         data = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(data, dict):
             return
+        self._current_page = ("process", data.get("kind"), data.get("agent_id"), data.get("process_id"))
+        self._clear_agent_selection()
+        self._clear_research_selection()
+        self._select_process_item(data)
         if data.get("kind") == "server":
             agent = self.agents.get(str(data.get("agent_id")))
             if not agent:

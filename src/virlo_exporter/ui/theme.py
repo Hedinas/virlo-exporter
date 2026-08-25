@@ -174,11 +174,11 @@ QToolButton#sectionTitle {
     font-size: 11px; font-weight: 700; letter-spacing: 1px; text-align: left;
 }
 QToolButton#chevron:hover, QToolButton#sectionTitle:hover { color: #F3F4F6; background: transparent; }
-QToolButton#gearButton {
-    background: transparent; border: none; color: #788291; font-size: 17px;
-    min-width: 28px; max-width: 28px; padding: 4px;
+QToolButton#gearButton, QToolButton#pencilButton {
+    background: transparent; border: none; color: #788291; font-size: 15px;
+    min-width: 26px; max-width: 26px; padding: 4px;
 }
-QToolButton#gearButton:hover { color: #DCE9FF; background: #29364A; }
+QToolButton#gearButton:hover, QToolButton#pencilButton:hover { color: #DCE9FF; background: #29364A; }
 QToolButton#platformPill {
     background: #171A20; color: #B7BEC9; border: 1px solid #465163;
     border-radius: 15px; padding: 7px 14px;
@@ -221,7 +221,9 @@ QMessageBox QLabel { color: #F3F4F6; background: transparent; }
 QDialogButtonBox { background: transparent; }
 QToolTip { background: #232832; color: #F3F4F6; border: 1px solid #3B4655; padding: 6px; }
 QFrame#sidebar QListWidget::item:selected { background: #1B2B42; }
-QListWidget#agentSidebarList::item:selected { background: transparent; }
+QListWidget#agentSidebarList::item:selected,
+QListWidget#researchSidebarList::item:selected,
+QListWidget#processSidebarList::item:selected { background: transparent; }
 """
 
 
