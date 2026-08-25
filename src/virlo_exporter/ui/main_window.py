@@ -90,6 +90,20 @@ def section_label(text: str) -> QLabel:
     return label
 
 
+def card_heading(text: str) -> QLabel:
+    """Level-1 heading for a card's own title (e.g. AGENT CONFIGURATION)."""
+    label = QLabel(text.upper())
+    label.setObjectName("cardHeading")
+    return label
+
+
+def micro_label(text: str) -> QLabel:
+    """Level-3 heading for mini-card/metric-card internal titles."""
+    label = QLabel(text.upper())
+    label.setObjectName("microLabel")
+    return label
+
+
 def muted(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("muted")
@@ -118,7 +132,7 @@ def mini_card(label_text: str, value_text: str, state: str = "neutral") -> QFram
     layout = QVBoxLayout(frame)
     layout.setContentsMargins(12, 10, 12, 10)
     layout.setSpacing(4)
-    layout.addWidget(section_label(label_text))
+    layout.addWidget(micro_label(label_text))
     value = QLabel(value_text)
     value.setObjectName("miniCardValue")
     value.setProperty("state", state)
@@ -149,7 +163,7 @@ def metric_card(label_text: str, value_text: str) -> QFrame:
     layout = QVBoxLayout(frame)
     layout.setContentsMargins(14, 11, 14, 11)
     layout.setSpacing(3)
-    layout.addWidget(section_label(label_text))
+    layout.addWidget(micro_label(label_text))
     value = QLabel(value_text)
     value.setObjectName("metricValue")
     layout.addWidget(value)
@@ -157,9 +171,14 @@ def metric_card(label_text: str, value_text: str) -> QFrame:
 
 
 class NaturalListWidget(QListWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, max_height: int | None = None) -> None:
         super().__init__(parent)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._max_height = max_height
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            if max_height is None
+            else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSpacing(2)
         self.setMinimumHeight(34)
@@ -169,8 +188,27 @@ class NaturalListWidget(QListWidget):
         for index in range(self.count()):
             if not self.item(index).isHidden():
                 height += max(36, self.sizeHintForRow(index)) + self.spacing()
-        self.setFixedHeight(max(34, height))
+        height = max(34, height)
+        if self._max_height is not None:
+            height = min(height, self._max_height)
+        self.setFixedHeight(height)
         self.verticalScrollBar().setValue(0)
+        # sizeHintForRow() can return a stale/incorrect value the first time
+        # this runs, before the widget (or an ancestor CollapsibleSection)
+        # has ever been shown. Re-measure once the event loop settles so
+        # expand/collapse doesn't leave a wrong fixed height behind.
+        QTimer.singleShot(0, self._resync_once_shown)
+
+    def _resync_once_shown(self) -> None:
+        height = 2 * self.frameWidth() + 6
+        for index in range(self.count()):
+            if not self.item(index).isHidden():
+                height += max(36, self.sizeHintForRow(index)) + self.spacing()
+        height = max(34, height)
+        if self._max_height is not None:
+            height = min(height, self._max_height)
+        if height != self.height():
+            self.setFixedHeight(height)
 
 
 class AgentRow(QFrame):
@@ -386,15 +424,21 @@ class MainWindow(QMainWindow):
         self.research_section.body_layout.addWidget(self.view_all_research)
         side.addWidget(self.research_section)
 
-        self.processes_section = CollapsibleSection("ACTIVE PROCESSES")
-        self.process_list = NaturalListWidget()
-        self.process_list.setObjectName("processSidebarList")
-        self.process_list.itemClicked.connect(self._process_selected)
-        self.processes_section.body_layout.addWidget(self.process_list)
-        side.addWidget(self.processes_section)
         side.addStretch()
         side_scroll.setWidget(side_body)
-        sidebar_layout.addWidget(side_scroll)
+        sidebar_layout.addWidget(side_scroll, 1)
+
+        processes_panel = QFrame()
+        processes_panel.setObjectName("processesPanel")
+        processes_layout = QVBoxLayout(processes_panel)
+        processes_layout.setContentsMargins(4, 10, 5, 4)
+        processes_layout.setSpacing(6)
+        processes_layout.addWidget(section_label("Active Processes"))
+        self.process_list = NaturalListWidget(max_height=4 * 66)
+        self.process_list.setObjectName("processSidebarList")
+        self.process_list.itemClicked.connect(self._process_selected)
+        processes_layout.addWidget(self.process_list)
+        sidebar_layout.addWidget(processes_panel, 0)
         self.main_splitter.addWidget(sidebar)
 
         self.detail = QStackedWidget()
@@ -408,10 +452,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
         self.setCentralWidget(central)
 
+        # ui/sidebar/processes_expanded is a legacy key from when Active
+        # Processes was collapsible; it is no longer read or written.
         section_settings = (
             (self.agents_section, "ui/sidebar/agents_expanded"),
             (self.research_section, "ui/sidebar/research_expanded"),
-            (self.processes_section, "ui/sidebar/processes_expanded"),
         )
         for section, key in section_settings:
             section.set_expanded(self.ui_settings.value(key, True, type=bool))
@@ -961,7 +1006,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
 
         overview, overview_layout = card()
-        overview_layout.addWidget(section_label("Agent configuration"))
+        overview_layout.addWidget(card_heading("Agent configuration"))
         config_splitter = QSplitter(Qt.Orientation.Horizontal)
         config_splitter.setObjectName("configurationSplitter")
         config_splitter.setChildrenCollapsible(False)
@@ -971,10 +1016,15 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 5, 12, 0)
         left_layout.setSpacing(9)
         left_layout.addWidget(section_label("Intent"))
+        intent_box = QFrame()
+        intent_box.setObjectName("intentBox")
+        intent_box_layout = QVBoxLayout(intent_box)
+        intent_box_layout.setContentsMargins(14, 12, 14, 12)
         intent = QLabel(agent.intent or "No intent returned")
         intent.setWordWrap(True)
         intent.setObjectName("bodyText")
-        left_layout.addWidget(intent)
+        intent_box_layout.addWidget(intent)
+        left_layout.addWidget(intent_box)
         left_layout.addWidget(section_label("Sources"))
         platform_row = QHBoxLayout()
         platform_row.setSpacing(6)
@@ -1057,7 +1107,7 @@ class MainWindow(QMainWindow):
         )
         overview_layout.addWidget(config_splitter)
         layout.addWidget(overview)
-        layout.addWidget(section_label("Research Runs"))
+        layout.addWidget(card_heading("Research Runs"))
         if known_runs is None:
             layout.addWidget(muted("Loading research runs…"))
             self._load_runs(agent_id)
@@ -1173,44 +1223,78 @@ class MainWindow(QMainWindow):
             layout.addWidget(muted(breakdown))
 
         run_info, run_info_layout = card()
-        run_info_layout.addWidget(section_label("Run info"))
+        run_info_layout.addWidget(card_heading("Run info"))
         duration = "—"
         if run.execution_time_ms:
             total_seconds = int(run.execution_time_ms / 1000)
             minutes, seconds = divmod(total_seconds, 60)
             duration = f"{minutes}m {seconds:02d}s"
-        for name, value in (
-            ("Started", human_date(run.started_at)),
-            ("Completed", human_date(run.completed_at)),
+        run_info_grid = QGridLayout()
+        run_info_grid.setSpacing(8)
+        run_info_grid.setColumnStretch(0, 1)
+        run_info_grid.setColumnStretch(1, 1)
+        run_info_fields = [
+            ("Started", compact_date(run.started_at)),
+            ("Completed", compact_date(run.completed_at)),
             ("Duration", duration),
-            ("Status", run.status.replace("_", " ").title()),
-            ("Platforms", " · ".join(value.title() for value in agent.platforms) or "—"),
             ("Keywords", str(len(agent.keywords))),
-        ):
-            row = QHBoxLayout()
-            row.addWidget(muted(name))
-            row.addStretch()
-            row.addWidget(QLabel(str(value)))
-            run_info_layout.addLayout(row)
+            ("Status", run.status.replace("_", " ").title()),
+            ("Cadence", agent.cadence or "—"),
+        ]
+        for index, (field_label, field_value) in enumerate(run_info_fields):
+            run_info_grid.addWidget(mini_card(field_label, field_value), index // 2, index % 2)
+        run_info_grid_host = QWidget()
+        run_info_grid_host.setLayout(run_info_grid)
+        run_info_layout.addWidget(run_info_grid_host)
+        run_info_layout.addWidget(section_label("Platforms"))
+        run_platform_row = QHBoxLayout()
+        run_platform_row.setSpacing(6)
+        for value in agent.platforms:
+            run_platform_row.addWidget(pill("Meta Ads" if value == "meta_ads" else value.title()))
+        run_platform_row.addStretch()
+        run_platform_host = QWidget()
+        run_platform_host.setLayout(run_platform_row)
+        run_info_layout.addWidget(run_platform_host)
         layout.addWidget(run_info)
 
         intelligence, intelligence_layout = card()
-        intelligence_layout.addWidget(section_label("Intelligence"))
-        analysis_ready = bool(agent.raw.get("analysis_data"))
-        intelligence_rows = (
-            ("Data Intelligence", agent.data_intelligence_enabled, "● Enabled", "● Disabled"),
-            ("Meta Ads", agent.meta_ads_enabled, "● Enabled", "● Disabled"),
-            ("Analysis", analysis_ready, "● Ready", "● Not available"),
-        )
-        for name, ready, ready_text, not_ready_text in intelligence_rows:
-            row = QHBoxLayout()
-            row.addWidget(muted(name))
-            row.addStretch()
-            state_label = QLabel(ready_text if ready else not_ready_text)
-            state_label.setObjectName("miniCardValue")
-            state_label.setProperty("state", "on" if ready else "off")
-            row.addWidget(state_label)
-            intelligence_layout.addLayout(row)
+        intelligence_layout.addWidget(card_heading("Intelligence"))
+        analysis_data = agent.raw.get("analysis_data")
+        analysis_ready = bool(analysis_data)
+        theme_count = len(analysis_data.get("themes", [])) if isinstance(analysis_data, dict) else 0
+        intelligence_grid = QGridLayout()
+        intelligence_grid.setSpacing(8)
+        intelligence_grid.setColumnStretch(0, 1)
+        intelligence_grid.setColumnStretch(1, 1)
+        intelligence_fields = [
+            (
+                "Data Intelligence",
+                "● Enabled" if agent.data_intelligence_enabled else "● Disabled",
+                "on" if agent.data_intelligence_enabled else "off",
+            ),
+            (
+                "Meta Ads",
+                "● Enabled" if agent.meta_ads_enabled else "● Disabled",
+                "on" if agent.meta_ads_enabled else "off",
+            ),
+            (
+                "Analysis",
+                f"● Ready · {theme_count} themes" if analysis_ready else "● Not available",
+                "on" if analysis_ready else "off",
+            ),
+            (
+                "Hooks",
+                "● Available" if agent.data_intelligence_enabled else "● Requires Data Intelligence",
+                "on" if agent.data_intelligence_enabled else "off",
+            ),
+        ]
+        for index, (field_label, field_value, field_state) in enumerate(intelligence_fields):
+            intelligence_grid.addWidget(
+                mini_card(field_label, field_value, field_state), index // 2, index % 2
+            )
+        intelligence_grid_host = QWidget()
+        intelligence_grid_host.setLayout(intelligence_grid)
+        intelligence_layout.addWidget(intelligence_grid_host)
         layout.addWidget(intelligence)
 
         export = QPushButton("Export for AI")
@@ -1220,7 +1304,7 @@ class MainWindow(QMainWindow):
         export.clicked.connect(lambda: self.start_export(agent, run))
         layout.addWidget(export)
         history = self.database.export_history(agent.id, run.id)
-        layout.addWidget(section_label("Exports"))
+        layout.addWidget(card_heading("Exports"))
         if not history:
             layout.addWidget(muted("No local exports yet."))
         for item in history:

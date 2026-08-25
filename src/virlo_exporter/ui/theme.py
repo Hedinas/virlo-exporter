@@ -23,6 +23,7 @@ QFrame#header { background: #12151A; border-bottom: 1px solid #2A303A; }
 QFrame#sidebar { background: #12151A; border-right: 1px solid #2A303A; }
 QFrame#card { background: #171A20; border: 1px solid #2A303A; border-radius: 12px; }
 QFrame#sidebarSection { background: transparent; border: none; }
+QFrame#processesPanel { background: transparent; border-top: 1px solid #2A303A; }
 QFrame#sidebarRow {
     background: transparent; border: 1px solid transparent; border-radius: 8px;
 }
@@ -37,6 +38,8 @@ QFrame#toggleRow {
 QFrame#divider { background: #2A303A; border: none; min-height: 1px; max-height: 1px; }
 QLabel#brand { font-size: 20px; font-weight: 700; color: #F9FAFB; }
 QLabel#eyebrow { font-size: 11px; font-weight: 700; color: #9CA3AF; letter-spacing: 1px; }
+QLabel#cardHeading { font-size: 15px; font-weight: 700; color: #F9FAFB; letter-spacing: 0.5px; }
+QLabel#microLabel { font-size: 10px; font-weight: 700; color: #7B8494; letter-spacing: 0.5px; }
 QLabel#title { font-size: 25px; font-weight: 700; color: #F9FAFB; }
 QLabel#cardTitle { font-size: 17px; font-weight: 700; color: #F9FAFB; }
 QLabel#rowTitle { font-weight: 600; color: #F3F4F6; }
@@ -98,7 +101,6 @@ QAbstractItemView {
 }
 QFrame#sidebar QListWidget { background: transparent; border: none; }
 QFrame#sidebar QListWidget::item:selected { background: #1B2B42; }
-QWidget#configurationMain { background: #171A20; }
 QListWidget#keywordDetailList { background: #0F1216; border-color: #232832; }
 QListWidget#keywordDetailList::item { padding: 5px 7px; margin: 0; }
 QListWidget::item, QTreeView::item { padding: 9px; border-radius: 7px; margin: 1px 2px; }
@@ -207,6 +209,7 @@ QLabel#platformBadge {
 QFrame#miniCard, QFrame#metricCard {
     background: #12151A; border: 1px solid #2A303A; border-radius: 9px;
 }
+QFrame#intentBox { background: transparent; border: 1px solid #2A303A; border-radius: 8px; }
 QLabel#miniCardValue { font-size: 14px; font-weight: 700; color: #F3F4F6; }
 QLabel#miniCardValue[state="on"] { color: #22C55E; }
 QLabel#miniCardValue[state="off"] { color: #9CA3AF; }

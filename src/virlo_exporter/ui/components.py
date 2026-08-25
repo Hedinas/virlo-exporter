@@ -400,6 +400,17 @@ class CollapsibleSection(QFrame):
         self.chevron.setChecked(expanded)
         self.chevron.setText("⌄" if expanded else "›")
         self.body.setVisible(expanded)
+        self.updateGeometry()
+        # Hiding/showing the body can leave a stale cached sizeHint on this
+        # section and its scroll-area ancestor until something else forces
+        # a relayout. Walk up and invalidate explicitly so collapse/expand
+        # never leaves a leftover gap or an undersized section.
+        parent = self.parentWidget()
+        while parent is not None:
+            parent.updateGeometry()
+            if isinstance(parent, QScrollArea):
+                break
+            parent = parent.parentWidget()
         self.expandedChanged.emit(expanded)
 
 
