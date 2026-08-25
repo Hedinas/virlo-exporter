@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -102,6 +103,56 @@ def card() -> tuple[QFrame, QVBoxLayout]:
     layout.setContentsMargins(18, 16, 18, 16)
     layout.setSpacing(10)
     return frame, layout
+
+
+def pill(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("platformBadge")
+    return label
+
+
+def mini_card(label_text: str, value_text: str, state: str = "neutral") -> QFrame:
+    frame = QFrame()
+    frame.setObjectName("miniCard")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(12, 10, 12, 10)
+    layout.setSpacing(4)
+    layout.addWidget(section_label(label_text))
+    value = QLabel(value_text)
+    value.setObjectName("miniCardValue")
+    value.setProperty("state", state)
+    layout.addWidget(value)
+    return frame
+
+
+def status_badge(text: str, state: str = "neutral") -> QLabel:
+    label = QLabel(text.upper())
+    label.setObjectName("statusBadge")
+    label.setProperty("state", state)
+    return label
+
+
+RUN_STATUS_STATE = {
+    "completed": "completed",
+    "partial_failure": "warning",
+    "running": "running",
+    "pending": "running",
+    "processing": "running",
+    "failed": "failed",
+}
+
+
+def metric_card(label_text: str, value_text: str) -> QFrame:
+    frame = QFrame()
+    frame.setObjectName("metricCard")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(14, 11, 14, 11)
+    layout.setSpacing(3)
+    layout.addWidget(section_label(label_text))
+    value = QLabel(value_text)
+    value.setObjectName("metricValue")
+    layout.addWidget(value)
+    return frame
 
 
 class NaturalListWidget(QListWidget):
@@ -895,6 +946,9 @@ class MainWindow(QMainWindow):
         more.setToolTip("More Agent actions")
         more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QMenu(more)
+        rename_action = QAction("Rename Agent", menu)
+        rename_action.triggered.connect(lambda: self.quick_rename_agent(agent))
+        menu.addAction(rename_action)
         copy_id = QAction("Copy Agent ID", menu)
         copy_id.triggered.connect(lambda: QApplication.clipboard().setText(agent.id))
         menu.addAction(copy_id)
@@ -915,28 +969,47 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 5, 12, 0)
         left_layout.setSpacing(9)
-        left_layout.addWidget(QLabel("Intent"))
+        left_layout.addWidget(section_label("Intent"))
         intent = QLabel(agent.intent or "No intent returned")
         intent.setWordWrap(True)
         intent.setObjectName("bodyText")
         left_layout.addWidget(intent)
-        left_layout.addWidget(section_label("Platforms"))
-        left_layout.addWidget(muted(" · ".join(value.title() for value in agent.platforms) or "—"))
-        for label, value in (
-            ("Language", "English only" if agent.english_only else "All languages"),
+        left_layout.addWidget(section_label("Sources"))
+        platform_row = QHBoxLayout()
+        platform_row.setSpacing(6)
+        for value in agent.platforms:
+            label_text = "Meta Ads" if value == "meta_ads" else value.title()
+            platform_row.addWidget(pill(label_text))
+        platform_row.addStretch()
+        platform_host = QWidget()
+        platform_host.setLayout(platform_row)
+        left_layout.addWidget(platform_host)
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        di_enabled = agent.data_intelligence_enabled
+        params = [
+            ("Language", "English only" if agent.english_only else "All languages", "neutral"),
+            ("Type", mode, "neutral"),
+            ("Data Intelligence", "● ON" if di_enabled else "● OFF", "on" if di_enabled else "off"),
             (
-                "Data Intelligence",
-                f"{'On' if agent.data_intelligence_enabled else 'Off'} · +${BillingSafety.DATA_INTELLIGENCE_ADDON:.2f}/research",
+                "Meta Ads",
+                "● ON" if agent.meta_ads_enabled else "● OFF",
+                "on" if agent.meta_ads_enabled else "off",
             ),
-            ("Meta Ads", "On" if agent.meta_ads_enabled else "Off"),
-            ("Type", mode),
-            ("Cadence", agent.cadence or "—"),
-        ):
-            row = QHBoxLayout()
-            row.addWidget(muted(label))
-            row.addStretch()
-            row.addWidget(QLabel(value))
-            left_layout.addLayout(row)
+            ("Cadence", agent.cadence or "—", "neutral"),
+            (
+                "Last Research",
+                human_date(run_timestamp(latest) if latest else agent.last_run_at),
+                "neutral",
+            ),
+        ]
+        for index, (label_text, value_text, state) in enumerate(params):
+            grid.addWidget(mini_card(label_text, value_text, state), index // 2, index % 2)
+        grid_host = QWidget()
+        grid_host.setLayout(grid)
+        left_layout.addWidget(grid_host)
         actions = QHBoxLayout()
         new_research = QPushButton("New Research")
         new_research.setObjectName("primary")
@@ -1000,16 +1073,18 @@ class MainWindow(QMainWindow):
     def _run_card(self, agent: Agent, run: Run) -> QFrame:
         frame, layout = card()
         top = QHBoxLayout()
-        title = QLabel(f"Research #{(run.local_number or 0):03d}")
+        number = run.local_number or 0
+        display_name = self.database.research_display_name(agent.id, run.id)
+        title = QLabel(display_name or f"Research #{number:03d}")
         title.setObjectName("cardTitle")
-        status = QLabel(run.status.replace("_", " ").title())
-        status.setObjectName(
-            "connected" if run.status in {"completed", "partial_failure"} else "muted"
-        )
         top.addWidget(title)
         top.addStretch()
-        top.addWidget(status)
+        top.addWidget(status_badge(run.status.replace("_", " "), RUN_STATUS_STATE.get(run.status.casefold(), "neutral")))
         layout.addLayout(top)
+        if display_name:
+            layout.addWidget(muted(f"Research #{number:03d} · {agent.name}"))
+        else:
+            layout.addWidget(muted(agent.name))
         layout.addWidget(muted(human_date(run_timestamp(run))))
         metrics = (
             f"Videos {run.videos_linked:,}    ·    Slideshows {run.slideshows_linked:,}    ·    "
@@ -1049,32 +1124,94 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
         layout = QVBoxLayout(body)
-        title = QLabel(f"Research #{(run.local_number or 0):03d}")
+        layout.setSpacing(14)
+        number = run.local_number or 0
+        display_name = self.database.research_display_name(agent.id, run.id)
+        header_box = QVBoxLayout()
+        header_box.setSpacing(2)
+        title_row = QHBoxLayout()
+        title = QLabel(display_name or f"Research #{number:03d}")
         title.setObjectName("title")
-        layout.addWidget(title)
-        layout.addWidget(muted(f"{agent.name} · {human_date(run_timestamp(run))}"))
-        detail, details = card()
-        details.addWidget(section_label("Run details"))
-        fields = [
-            ("Status", run.status.replace("_", " ").title()),
-            ("Started", human_date(run.started_at)),
-            ("Completed", human_date(run.completed_at)),
+        title_row.addWidget(title)
+        rename_button = QToolButton()
+        rename_button.setObjectName("pencilButton")
+        rename_button.setText("✎")
+        rename_button.setToolTip("Rename research")
+        rename_button.clicked.connect(lambda: self.rename_research(agent, run))
+        title_row.addWidget(rename_button)
+        title_row.addStretch()
+        status_state = RUN_STATUS_STATE.get(run.status.casefold(), "neutral")
+        title_row.addWidget(status_badge(run.status.replace("_", " "), status_state))
+        header_box.addLayout(title_row)
+        if display_name:
+            header_box.addWidget(muted(f"Research #{number:03d} · {agent.name}"))
+        else:
+            header_box.addWidget(muted(agent.name))
+        header_box.addWidget(muted(human_date(run_timestamp(run))))
+        layout.addLayout(header_box)
+
+        metrics_row = QHBoxLayout()
+        metrics_row.setSpacing(10)
+        for label_text, value_text in (
             ("Videos", f"{run.videos_linked:,}"),
             ("Slideshows", f"{run.slideshows_linked:,}"),
-            ("Meta ads", f"{run.meta_ads_linked:,}"),
+            ("Meta Ads", f"{run.meta_ads_linked:,}"),
             ("Outliers", f"{run.outliers_identified:,}"),
-            (
-                "Execution",
-                f"{(run.execution_time_ms or 0) / 60000:.1f} min" if run.execution_time_ms else "—",
-            ),
+        ):
+            metrics_row.addWidget(metric_card(label_text, value_text))
+        layout.addLayout(metrics_row)
+
+        raw = run.raw or {}
+        platform_counts = [
+            (name, raw.get(f"{name}_count"))
+            for name in ("youtube", "tiktok", "instagram")
+            if raw.get(f"{name}_count") is not None
         ]
-        for name, value in fields:
+        if platform_counts:
+            breakdown = "   ·   ".join(f"{name.title()} {count:,}" for name, count in platform_counts)
+            layout.addWidget(muted(breakdown))
+
+        run_info, run_info_layout = card()
+        run_info_layout.addWidget(section_label("Run info"))
+        duration = "—"
+        if run.execution_time_ms:
+            total_seconds = int(run.execution_time_ms / 1000)
+            minutes, seconds = divmod(total_seconds, 60)
+            duration = f"{minutes}m {seconds:02d}s"
+        for name, value in (
+            ("Started", human_date(run.started_at)),
+            ("Completed", human_date(run.completed_at)),
+            ("Duration", duration),
+            ("Status", run.status.replace("_", " ").title()),
+            ("Platforms", " · ".join(value.title() for value in agent.platforms) or "—"),
+            ("Keywords", str(len(agent.keywords))),
+        ):
             row = QHBoxLayout()
             row.addWidget(muted(name))
             row.addStretch()
             row.addWidget(QLabel(str(value)))
-            details.addLayout(row)
-        layout.addWidget(detail)
+            run_info_layout.addLayout(row)
+        layout.addWidget(run_info)
+
+        intelligence, intelligence_layout = card()
+        intelligence_layout.addWidget(section_label("Intelligence"))
+        analysis_ready = bool(agent.raw.get("analysis_data"))
+        intelligence_rows = (
+            ("Data Intelligence", agent.data_intelligence_enabled, "● Enabled", "● Disabled"),
+            ("Meta Ads", agent.meta_ads_enabled, "● Enabled", "● Disabled"),
+            ("Analysis", analysis_ready, "● Ready", "● Not available"),
+        )
+        for name, ready, ready_text, not_ready_text in intelligence_rows:
+            row = QHBoxLayout()
+            row.addWidget(muted(name))
+            row.addStretch()
+            state_label = QLabel(ready_text if ready else not_ready_text)
+            state_label.setObjectName("miniCardValue")
+            state_label.setProperty("state", "on" if ready else "off")
+            row.addWidget(state_label)
+            intelligence_layout.addLayout(row)
+        layout.addWidget(intelligence)
+
         export = QPushButton("Export for AI")
         export.setObjectName("primary")
         export.setMinimumHeight(44)

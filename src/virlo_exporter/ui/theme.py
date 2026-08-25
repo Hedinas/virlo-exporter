@@ -200,6 +200,27 @@ QToolButton#keywordChip {
 }
 QToolButton#keywordChip:hover { background: #293B52; border-color: #5685BE; }
 
+QLabel#platformBadge {
+    background: #171A20; color: #B7BEC9; border: 1px solid #465163;
+    border-radius: 12px; padding: 5px 12px; font-weight: 600; font-size: 12px;
+}
+QFrame#miniCard, QFrame#metricCard {
+    background: #12151A; border: 1px solid #2A303A; border-radius: 9px;
+}
+QLabel#miniCardValue { font-size: 14px; font-weight: 700; color: #F3F4F6; }
+QLabel#miniCardValue[state="on"] { color: #22C55E; }
+QLabel#miniCardValue[state="off"] { color: #9CA3AF; }
+QLabel#miniCardValue[state="neutral"] { color: #D8DCE3; }
+QLabel#miniCardValue[state="error"] { color: #EF4444; }
+QLabel#metricValue { font-size: 19px; font-weight: 700; color: #F9FAFB; }
+QLabel#statusBadge {
+    border-radius: 11px; padding: 3px 11px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
+}
+QLabel#statusBadge[state="completed"] { background: #123524; color: #34D399; }
+QLabel#statusBadge[state="running"] { background: #1C2C42; color: #60A5FA; }
+QLabel#statusBadge[state="warning"] { background: #2E2411; color: #F2B84B; }
+QLabel#statusBadge[state="failed"] { background: #331416; color: #F87171; }
+QLabel#statusBadge[state="neutral"] { background: #1C2027; color: #9CA3AF; }
 QFrame#intentField, QFrame#keywordEditor {
     background: #1C2027; border: 1px solid #2A303A; border-radius: 8px;
 }
