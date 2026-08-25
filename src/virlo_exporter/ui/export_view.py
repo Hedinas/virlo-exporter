@@ -284,6 +284,18 @@ class ExportTimelineWidget(QWidget):
             )
 
 
+def format_bytes(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    for unit in ("B", "KB", "MB", "GB"):
+        if number < 1024 or unit == "GB":
+            return f"{number:.0f} {unit}" if unit == "B" else f"{number:.1f} {unit}"
+        number /= 1024
+    return f"{number:.1f} GB"
+
+
 def build_completion_summary(
     *, status_text: str, state: str, stats: dict[str, Any], warnings: list[str]
 ) -> QFrame:
@@ -296,17 +308,7 @@ def build_completion_summary(
     badge.setProperty("state", state)
     layout.addWidget(badge)
 
-    def size(value: Any) -> str:
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            return "—"
-        for unit in ("B", "KB", "MB", "GB"):
-            if number < 1024 or unit == "GB":
-                return f"{number:.0f} {unit}" if unit == "B" else f"{number:.1f} {unit}"
-            number /= 1024
-        return f"{number:.1f} GB"
-
+    size = format_bytes
     metrics_row = QHBoxLayout()
     metrics_row.setSpacing(10)
     for label_text, value_text in (

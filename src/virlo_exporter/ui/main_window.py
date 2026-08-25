@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from threading import Event
 from typing import Any
 
-from PySide6.QtCore import QSettings, QSize, Qt, QThreadPool, QTimer
+from PySide6.QtCore import QSettings, QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -41,12 +42,13 @@ from virlo_exporter.api.errors import (
     VirloError,
 )
 from virlo_exporter.config import AppSettings, SettingsStore
+from virlo_exporter.export import report as export_report
 from virlo_exporter.export.engine import ExportEngine, ExportResult
 from virlo_exporter.models import Agent, Run
 from virlo_exporter.services.workers import Worker
 from virlo_exporter.storage.database import Database
 from virlo_exporter.storage.key_store import ApiKeyStore
-from virlo_exporter.utils.files import open_in_explorer
+from virlo_exporter.utils.files import open_in_explorer, reveal_in_explorer
 
 from .components import (
     AgentEditorDialog,
@@ -56,7 +58,7 @@ from .components import (
     ensure_visible,
 )
 from .dialogs import ApiKeyDialog, PaidConfirmationDialog, SettingsDialog, show_error
-from .export_view import ExportTimelineWidget, build_completion_summary
+from .export_view import ExportTimelineWidget, build_completion_summary, format_bytes
 from .logic import agent_display_status, research_search_text, run_timestamp
 
 logger = logging.getLogger(__name__)
@@ -145,6 +147,20 @@ def status_badge(text: str, state: str = "neutral") -> QLabel:
     label.setObjectName("statusBadge")
     label.setProperty("state", state)
     return label
+
+
+class ClickableStatusBadge(QLabel):
+    clicked = Signal()
+
+    def __init__(self, text: str, state: str = "neutral") -> None:
+        super().__init__(text.upper())
+        self.setObjectName("statusBadge")
+        self.setProperty("state", state)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event: Any) -> None:
+        self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 RUN_STATUS_STATE = {
@@ -1123,35 +1139,125 @@ class MainWindow(QMainWindow):
 
     def _run_card(self, agent: Agent, run: Run) -> QFrame:
         frame, layout = card()
-        top = QHBoxLayout()
         number = run.local_number or 0
         display_name = self.database.research_display_name(agent.id, run.id)
+        top = QHBoxLayout()
         title = QLabel(display_name or f"Research #{number:03d}")
         title.setObjectName("cardTitle")
         top.addWidget(title)
         top.addStretch()
-        top.addWidget(status_badge(run.status.replace("_", " "), RUN_STATUS_STATE.get(run.status.casefold(), "neutral")))
-        layout.addLayout(top)
-        if display_name:
-            layout.addWidget(muted(f"Research #{number:03d} · {agent.name}"))
-        else:
-            layout.addWidget(muted(agent.name))
-        layout.addWidget(muted(human_date(run_timestamp(run))))
-        metrics = (
-            f"Videos {run.videos_linked:,}    ·    Slideshows {run.slideshows_linked:,}    ·    "
-            f"Ads {run.meta_ads_linked:,}    ·    Outliers {run.outliers_identified:,}"
+        top.addWidget(
+            status_badge(run.status.replace("_", " "), RUN_STATUS_STATE.get(run.status.casefold(), "neutral"))
         )
-        layout.addWidget(muted(metrics))
+        layout.addLayout(top)
+        subtitle = f"Research #{number:03d} · {human_date(run_timestamp(run))}"
+        if display_name:
+            subtitle = f"Research #{number:03d} · {agent.name} · {human_date(run_timestamp(run))}"
+        layout.addWidget(muted(subtitle))
+
+        metrics_row = QHBoxLayout()
+        metrics_row.setSpacing(8)
+        for label_text, value_text in (
+            ("Videos", f"{run.videos_linked:,}"),
+            ("Slideshows", f"{run.slideshows_linked:,}"),
+            ("Meta Ads", f"{run.meta_ads_linked:,}"),
+            ("Outliers", f"{run.outliers_identified:,}"),
+        ):
+            metrics_row.addWidget(metric_card(label_text, value_text))
+        layout.addLayout(metrics_row)
+
         actions = QHBoxLayout()
-        open_button = QPushButton("Open")
+        open_button = QPushButton("Open Research")
         open_button.clicked.connect(lambda: self.show_run(agent, run))
+        actions.addWidget(open_button)
+        actions.addStretch()
         export = QPushButton("Export for AI")
         export.setObjectName("primary")
         export.setEnabled(run.status in {"completed", "partial_failure"})
         export.clicked.connect(lambda: self.start_export(agent, run))
-        actions.addWidget(open_button)
         actions.addWidget(export)
+        layout.addLayout(actions)
+        return frame
+
+    @staticmethod
+    def _read_export_summary(export_dir: str) -> dict[str, Any]:
+        path = Path(export_dir) / export_report.REPORT_FILENAME
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        summary = payload.get("summary")
+        return summary if isinstance(summary, dict) else {}
+
+    def reveal_export_report(
+        self, agent: Agent, run: Run, export_record: dict[str, Any]
+    ) -> None:
+        export_dir = Path(export_record["path"])
+        if not export_dir.exists():
+            show_error(self, "Export folder missing", "This export's folder no longer exists on disk.")
+            return
+        path = export_report.ensure_report(
+            export_dir,
+            export_row=export_record,
+            stages=self.database.export_stages(export_record["id"]),
+            agent_name=agent.name,
+        )
+        reveal_in_explorer(path)
+
+    def _export_card(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> QFrame:
+        frame, layout = card()
+        status = str(export_record["status"])
+        state = RUN_STATUS_STATE.get(status.casefold(), "neutral")
+        top = QHBoxLayout()
+        title = QLabel(f"Export #{export_record['export_number']:03d}")
+        title.setObjectName("cardTitle")
+        top.addWidget(title)
+        top.addStretch()
+        badge = ClickableStatusBadge(status.replace("_", " "), state)
+        if status in {"failed", "complete_with_warnings"}:
+            badge.setToolTip("Open EXPORT_REPORT.json")
+            badge.clicked.connect(
+                lambda _=False, record=export_record: self.reveal_export_report(agent, run, record)
+            )
+        top.addWidget(badge)
+        layout.addLayout(top)
+        layout.addWidget(
+            muted(human_date(export_record.get("completed_at") or export_record.get("started_at")))
+        )
+
+        summary = self._read_export_summary(export_record["path"])
+        metrics: list[tuple[str, str]] = []
+        if "dataset_bytes" in summary:
+            metrics.append(("AI Dataset", format_bytes(summary["dataset_bytes"])))
+        if "raw_bytes" in summary:
+            metrics.append(("RAW Data", format_bytes(summary["raw_bytes"])))
+        if "videos" in summary:
+            metrics.append(("Videos", f"{summary['videos']:,}"))
+        metrics.append(("Warnings", str(summary.get("warnings", 0))))
+        if metrics:
+            metrics_row = QHBoxLayout()
+            metrics_row.setSpacing(8)
+            for label_text, value_text in metrics:
+                metrics_row.addWidget(metric_card(label_text, value_text))
+            layout.addLayout(metrics_row)
+
+        actions = QHBoxLayout()
+        view_button = QPushButton("View Process")
+        view_button.clicked.connect(
+            lambda _=False, record=export_record: self.open_export_history(agent, run, record)
+        )
+        actions.addWidget(view_button)
+        open_button = QPushButton("Open Folder")
+        open_button.clicked.connect(
+            lambda _=False, path=export_record["path"]: open_in_explorer(Path(path))
+        )
+        actions.addWidget(open_button)
         actions.addStretch()
+        report_button = QPushButton("Report")
+        report_button.clicked.connect(
+            lambda _=False, record=export_record: self.reveal_export_report(agent, run, record)
+        )
+        actions.addWidget(report_button)
         layout.addLayout(actions)
         return frame
 
@@ -1308,22 +1414,7 @@ class MainWindow(QMainWindow):
         if not history:
             layout.addWidget(muted("No local exports yet."))
         for item in history:
-            row = QHBoxLayout()
-            row.addWidget(QLabel(f"Export #{item['export_number']:03d}"))
-            row.addWidget(muted(human_date(item.get("completed_at") or item.get("started_at"))))
-            row.addStretch()
-            row.addWidget(status_badge(str(item["status"]).replace("_", " "), RUN_STATUS_STATE.get(str(item["status"]).casefold(), "neutral")))
-            timeline_button = QPushButton("View Timeline")
-            timeline_button.clicked.connect(
-                lambda _=False, record=item: self.open_export_history(agent, run, record)
-            )
-            row.addWidget(timeline_button)
-            open_button = QPushButton("Open Folder")
-            open_button.clicked.connect(
-                lambda _=False, path=item["path"]: open_in_explorer(Path(path))
-            )
-            row.addWidget(open_button)
-            layout.addLayout(row)
+            layout.addWidget(self._export_card(agent, run, item))
         layout.addStretch()
         scroll.setWidget(body)
         root.addWidget(scroll)

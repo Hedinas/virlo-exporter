@@ -118,7 +118,7 @@ class ExportEngine:
         tracker = StageTracker(self.database, export_id, self.progress)
         self._tracker = tracker
 
-        def save_report(status: str) -> None:
+        def save_report(status: str, extra_summary: dict[str, Any] | None = None) -> None:
             if export_dir is None:
                 return
             export_row = {
@@ -129,16 +129,18 @@ class ExportEngine:
                 "completed_at": datetime.now(UTC).isoformat(),
                 "validation_state": "warnings" if manifest["warnings"] else "valid",
             }
+            summary = {
+                "videos": len(resources.get("videos", [])),
+                "warnings": len(manifest["warnings"]),
+                "errors": len(manifest["errors"]),
+                "paid_api_calls": 0,
+            }
+            summary.update(extra_summary or {})
             report = build_report(
                 export_row=export_row,
                 stages=self.database.export_stages(export_id),
                 agent_name=agent_name,
-                summary={
-                    "videos": len(resources.get("videos", [])),
-                    "warnings": len(manifest["warnings"]),
-                    "errors": len(manifest["errors"]),
-                    "paid_api_calls": 0,
-                },
+                summary=summary,
                 warnings=diagnostics,
                 errors=fatal_diagnostics,
             )
@@ -342,7 +344,15 @@ class ExportEngine:
                 "warning" if manifest["warnings"] else "complete",
                 summary=(f"Complete with {len(manifest['warnings'])} warning(s)" if manifest["warnings"] else "Export complete"),
             )
-            save_report("complete_with_warnings" if manifest["warnings"] else "complete")
+            save_report(
+                "complete_with_warnings" if manifest["warnings"] else "complete",
+                extra_summary={
+                    "raw_bytes": statistics["raw_bytes"],
+                    "dataset_bytes": statistics["dataset_bytes"],
+                    "high_signal_videos": statistics["high_signal"],
+                    "baseline_videos": statistics["baseline"],
+                },
+            )
             return ExportResult(
                 export_dir, dataset_path, complete, manifest["warnings"], manifest,
                 export_id, export_number, research_number, statistics
