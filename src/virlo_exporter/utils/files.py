@@ -27,3 +27,10 @@ def open_in_explorer(path: Path) -> None:
     import os
 
     os.startfile(str(path.resolve()))  # type: ignore[attr-defined]
+
+
+def reveal_in_explorer(path: Path) -> None:
+    """Open Windows Explorer with `path` selected, rather than launching it."""
+    import subprocess
+
+    subprocess.run(["explorer", f"/select,{path.resolve()}"], check=False)

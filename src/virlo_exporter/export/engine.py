@@ -20,6 +20,7 @@ from virlo_exporter.storage.database import Database
 from virlo_exporter.utils.files import safe_filename
 
 from .dataset import count_platforms, deterministic_baseline, select_high_signal
+from .report import build_report, write_report
 from .timeline import StageTracker
 
 logger = logging.getLogger(__name__)
@@ -108,10 +109,41 @@ class ExportEngine:
             agent_id, run_id, research_number, provisional, started.isoformat()
         )
         manifest: dict[str, Any] = {"resources": {}, "warnings": [], "errors": []}
+        diagnostics: list[dict[str, Any]] = []
+        fatal_diagnostics: list[dict[str, Any]] = []
+        resources: dict[str, Any] = {}
         export_dir: Path | None = None
+        agent_name = agent_id
         log_lines = [f"{started.isoformat()} export started", "Billing policy: FREE_READ only"]
         tracker = StageTracker(self.database, export_id, self.progress)
         self._tracker = tracker
+
+        def save_report(status: str) -> None:
+            if export_dir is None:
+                return
+            export_row = {
+                "export_number": export_number,
+                "research_number": research_number,
+                "status": status,
+                "started_at": started.isoformat(),
+                "completed_at": datetime.now(UTC).isoformat(),
+                "validation_state": "warnings" if manifest["warnings"] else "valid",
+            }
+            report = build_report(
+                export_row=export_row,
+                stages=self.database.export_stages(export_id),
+                agent_name=agent_name,
+                summary={
+                    "videos": len(resources.get("videos", [])),
+                    "warnings": len(manifest["warnings"]),
+                    "errors": len(manifest["errors"]),
+                    "paid_api_calls": 0,
+                },
+                warnings=diagnostics,
+                errors=fatal_diagnostics,
+            )
+            with suppress(OSError):
+                write_report(export_dir, report)
 
         try:
             tracker.start("prepare", "Preparing export", detail="Allocating a local export record")
@@ -149,8 +181,8 @@ class ExportEngine:
                 "/agents/:id/runs/:run_id", "run", 1, 1
             )
             tracker.finish(summary="Agent and selected run saved")
+            agent_name = str(agent.get("name") or agent_id)
 
-            resources: dict[str, Any] = {}
             di_enabled = bool(agent.get("data_intelligence_enabled"))
             for resource in self.RESOURCE_ORDER:
                 label = f"Fetching {resource.replace('_', ' ')}"
@@ -198,6 +230,14 @@ class ExportEngine:
                     )
                 except VirloError as exc:
                     status = "unavailable" if exc.status_code in {400, 404} else "failed"
+                    error_code = exc.details.get("code") if isinstance(exc.details, dict) else None
+                    diagnostic_entry = {
+                        "stage": resource,
+                        "endpoint": f"/agents/:id/{resource}",
+                        "http_status": exc.status_code,
+                        "error_code": error_code,
+                        "message": str(exc),
+                    }
                     manifest["resources"][resource] = {
                         "endpoint": f"/agents/:id/{resource}",
                         "scope": "agent",
@@ -209,12 +249,14 @@ class ExportEngine:
                     }
                     if resource == "videos":
                         manifest["errors"].append(f"videos: {exc}")
+                        fatal_diagnostics.append(diagnostic_entry)
                         tracker.finish("failed", summary="Required resource failed", detail=str(exc))
                         log_lines.append(f"FATAL {resource}: {type(exc).__name__}: {exc}")
                         raise ExportFatalError(
                             f"Required videos stage failed: {exc}", status_code=exc.status_code
                         ) from exc
                     manifest["warnings"].append(f"{resource}: {exc}")
+                    diagnostics.append(diagnostic_entry)
                     log_lines.append(f"WARN {resource}: {type(exc).__name__}: {exc}")
                     tracker.finish("warning", summary="Optional resource unavailable", detail=str(exc))
 
@@ -250,6 +292,16 @@ class ExportEngine:
             tracker.start("validation", "Validating files and manifest")
             validation_warnings = self._validate(export_dir, dataset, resources)
             manifest["warnings"].extend(validation_warnings)
+            diagnostics.extend(
+                {
+                    "stage": "validation",
+                    "endpoint": None,
+                    "http_status": None,
+                    "error_code": None,
+                    "message": message,
+                }
+                for message in validation_warnings
+            )
             complete = True
             if manifest["warnings"]:
                 dataset["_export_status"] = {
@@ -290,6 +342,7 @@ class ExportEngine:
                 "warning" if manifest["warnings"] else "complete",
                 summary=(f"Complete with {len(manifest['warnings'])} warning(s)" if manifest["warnings"] else "Export complete"),
             )
+            save_report("complete_with_warnings" if manifest["warnings"] else "complete")
             return ExportResult(
                 export_dir, dataset_path, complete, manifest["warnings"], manifest,
                 export_id, export_number, research_number, statistics
@@ -306,6 +359,7 @@ class ExportEngine:
                 completed_at=datetime.now(UTC).isoformat(),
                 validation="incomplete",
             )
+            save_report("cancelled")
             raise
         except Exception as exc:
             if tracker.current and tracker.current.get("status") == "running":
@@ -313,6 +367,16 @@ class ExportEngine:
             detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
             log_lines.append(f"FATAL {type(exc).__name__}: {exc}")
             log_lines.append(detail.rstrip())
+            if not isinstance(exc, ExportFatalError):
+                fatal_diagnostics.append(
+                    {
+                        "stage": tracker.current.get("stage") if tracker.current else None,
+                        "endpoint": None,
+                        "http_status": getattr(exc, "status_code", None),
+                        "error_code": None,
+                        "message": str(exc),
+                    }
+                )
             if export_dir:
                 (export_dir / "EXPORT_INCOMPLETE").write_text(
                     "Export failed. See application logs.\n", encoding="utf-8"
@@ -328,6 +392,7 @@ class ExportEngine:
                 completed_at=datetime.now(UTC).isoformat(),
                 validation="incomplete",
             )
+            save_report("failed")
             raise
 
     @staticmethod
