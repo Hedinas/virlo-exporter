@@ -80,12 +80,15 @@ class ExportEngine:
         self.baseline_sample_size = baseline_sample_size
         self.progress = progress
         self.cancel_event = cancel_event or Event()
+        self._tracker: StageTracker | None = None
 
-    def _progress(self, **value: Any) -> None:
+    def _check_progress(
+        self, current: int, total: int | None, message: str | None = None
+    ) -> None:
         if self.cancel_event.is_set():
             raise ExportCancelled()
-        if self.progress:
-            self.progress(value)
+        if self._tracker:
+            self._tracker.update(current=current, total=total, message=message)
 
     @staticmethod
     def _write_json(path: Path, value: Any) -> None:
@@ -108,6 +111,7 @@ class ExportEngine:
         export_dir: Path | None = None
         log_lines = [f"{started.isoformat()} export started", "Billing policy: FREE_READ only"]
         tracker = StageTracker(self.database, export_id, self.progress)
+        self._tracker = tracker
 
         try:
             tracker.start("prepare", "Preparing export", detail="Allocating a local export record")
@@ -148,7 +152,7 @@ class ExportEngine:
 
             resources: dict[str, Any] = {}
             di_enabled = bool(agent.get("data_intelligence_enabled"))
-            for index, resource in enumerate(self.RESOURCE_ORDER, start=1):
+            for resource in self.RESOURCE_ORDER:
                 label = f"Fetching {resource.replace('_', ' ')}"
                 tracker.start(resource, label)
                 if resource == "hooks" and not di_enabled:
@@ -163,8 +167,17 @@ class ExportEngine:
                     if resource == "runs":
                         result = self.client.list_runs(agent_id)
                     else:
+
+                        def on_page(
+                            page: int, count_so_far: int, expected_total: int | None
+                        ) -> None:
+                            self._check_progress(count_so_far, expected_total, f"Page {page}")
+
                         result = self.client.get_resource(
-                            agent_id, resource, data_intelligence_enabled=di_enabled
+                            agent_id,
+                            resource,
+                            data_intelligence_enabled=di_enabled,
+                            on_page=on_page,
                         )
                     resources[resource] = result.records
                     self._write_json(raw_dir / f"{resource}.json", result.records)

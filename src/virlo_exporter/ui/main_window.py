@@ -56,6 +56,7 @@ from .components import (
     ensure_visible,
 )
 from .dialogs import ApiKeyDialog, PaidConfirmationDialog, SettingsDialog, show_error
+from .export_view import ExportTimelineWidget, build_completion_summary
 from .logic import agent_display_status, research_search_text, run_timestamp
 
 logger = logging.getLogger(__name__)
@@ -1227,7 +1228,12 @@ class MainWindow(QMainWindow):
             row.addWidget(QLabel(f"Export #{item['export_number']:03d}"))
             row.addWidget(muted(human_date(item.get("completed_at") or item.get("started_at"))))
             row.addStretch()
-            row.addWidget(QLabel(str(item["status"]).title()))
+            row.addWidget(status_badge(str(item["status"]).replace("_", " "), RUN_STATUS_STATE.get(str(item["status"]).casefold(), "neutral")))
+            timeline_button = QPushButton("View Timeline")
+            timeline_button.clicked.connect(
+                lambda _=False, record=item: self.open_export_history(agent, run, record)
+            )
+            row.addWidget(timeline_button)
             open_button = QPushButton("Open Folder")
             open_button.clicked.connect(
                 lambda _=False, path=item["path"]: open_in_explorer(Path(path))
@@ -1471,6 +1477,8 @@ class MainWindow(QMainWindow):
                 )
             layout.addStretch()
             self._show_page(page)
+        elif self._open_export_process(data):
+            return
         else:
             page = QWidget()
             layout = QVBoxLayout(page)
@@ -1499,31 +1507,22 @@ class MainWindow(QMainWindow):
             return
         self.export_cancel = Event()
         process_id = f"export:{agent.id}:{run.id}"
-        label = f"Export Research #{(run.local_number or 0):03d}"
+        number = run.local_number or 0
+        label = f"Export Research #{number:03d}"
         self.database.upsert_process(
             process_id, "export", label, "running", {"stage": "starting"}
         )
         self._populate_processes()
+
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(35, 30, 35, 30)
-        layout.addWidget(section_label("Local Export Process"))
-        title = QLabel(label)
-        title.setObjectName("title")
-        layout.addWidget(title)
-        stage_label = QLabel("Preparing export…")
-        layout.addWidget(stage_label)
-        bar = QProgressBar()
-        bar.setRange(0, 100)
-        layout.addWidget(bar)
-        layout.addWidget(
-            muted("Export reads existing Agent data and never calls paid enrichment endpoints.")
-        )
-        cancel = QPushButton("Cancel Export")
-        cancel.setObjectName("danger")
-        cancel.clicked.connect(self.export_cancel.set)
-        layout.addWidget(cancel, alignment=Qt.AlignmentFlag.AlignLeft)
-        layout.addStretch()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(28, 24, 28, 24)
+        timeline = ExportTimelineWidget(live=True)
+        display_name = self.database.research_display_name(agent.id, run.id)
+        subtitle = display_name or f"Research #{number:03d}"
+        timeline.set_header(label.upper(), f"{subtitle} · {agent.name}")
+        timeline.cancelRequested.connect(self.export_cancel.set)
+        page_layout.addWidget(timeline)
         self._show_page(page)
         client = self.client
 
@@ -1541,77 +1540,130 @@ class MainWindow(QMainWindow):
         worker = Worker(do_export, progress=None)
         self.active_workers.add(worker)
 
-        def progress(value: dict[str, Any]) -> None:
-            current = int(value.get("current", 0))
-            total = max(1, int(value.get("total", 1)))
-            percent = min(100, round(current * 100 / total))
-            stage = str(value.get("stage", "export")).replace("_", " ").title()
-            stage_label.setText(stage)
-            bar.setValue(percent)
-            self.database.upsert_process(
-                process_id, "export", label, "running", {"stage": stage, "percent": percent}
-            )
+        def progress(event: dict[str, Any]) -> None:
+            timeline.apply_event(event)
+            stage_label = str(event.get("label", "Working"))
+            payload: dict[str, Any] = {"stage": stage_label}
+            current = event.get("current")
+            total = event.get("total")
+            if isinstance(current, int) and isinstance(total, int) and total > 0:
+                payload["percent"] = min(100, round(current * 100 / total))
+            self.database.upsert_process(process_id, "export", label, "running", payload)
             self._populate_processes()
 
         worker.signals.progress.connect(progress)
         worker.signals.result.connect(
-            lambda result: self._export_done(process_id, result, agent, run)
+            lambda result: self._export_done(process_id, timeline, result, agent, run)
         )
         worker.signals.error.connect(
-            lambda error, details: self._export_failed(process_id, error, details)
+            lambda error, details: self._export_failed(process_id, timeline, error, details)
         )
         worker.signals.finished.connect(lambda: self._worker_finished(worker))
         QThreadPool.globalInstance().start(worker)
 
     def _export_done(
-        self, process_id: str, result: ExportResult, agent: Agent, run: Run
+        self,
+        process_id: str,
+        timeline: ExportTimelineWidget,
+        result: ExportResult,
+        agent: Agent,
+        run: Run,
     ) -> None:
+        timeline.stop_timer()
         self.database.upsert_process(
             process_id, "export", "Export", "complete", {"path": str(result.path)}
         )
         self._populate_processes()
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(40, 35, 40, 35)
-        layout.addWidget(section_label("Export Complete"))
-        title = QLabel("VIRLO_AI_DATASET.json is ready")
-        title.setObjectName("title")
-        layout.addWidget(title)
-        layout.addWidget(muted(str(result.dataset_path)))
-        if result.warnings:
-            layout.addWidget(
-                muted(
-                    f"Completed with {len(result.warnings)} warning(s). See the embedded manifest and export.log."
-                )
-            )
+        has_warnings = bool(result.warnings)
+        timeline.set_overall_status(
+            "Complete with warnings" if has_warnings else "Complete",
+            "warning" if has_warnings else "completed",
+        )
+        summary = build_completion_summary(
+            status_text="Export complete with warnings" if has_warnings else "Export complete",
+            state="warning" if has_warnings else "completed",
+            stats=result.statistics,
+            warnings=result.warnings,
+        )
         actions = QHBoxLayout()
         open_button = QPushButton("Open Folder")
         open_button.setObjectName("primary")
         open_button.clicked.connect(lambda: open_in_explorer(result.path))
-        copy = QPushButton("Copy Path")
+        copy = QPushButton("Copy Dataset Path")
         copy.clicked.connect(lambda: QApplication.clipboard().setText(str(result.dataset_path)))
+        open_log = QPushButton("Open Export Log")
+        open_log.clicked.connect(lambda: open_in_explorer(result.path / "export.log"))
         back = QPushButton("Back to Research")
         back.clicked.connect(lambda: self.show_run(agent, run))
         actions.addWidget(open_button)
         actions.addWidget(copy)
+        actions.addWidget(open_log)
         actions.addWidget(back)
         actions.addStretch()
-        layout.addLayout(actions)
-        layout.addStretch()
-        self._show_page(page)
+        summary.layout().addLayout(actions)
+        timeline.layout().addWidget(summary)
         if self.settings.open_folder_after_export:
             open_in_explorer(result.path)
 
     def _export_failed(
-        self, process_id: str, error: Exception | str, details: str
+        self,
+        process_id: str,
+        timeline: ExportTimelineWidget,
+        error: Exception | str,
+        details: str,
     ) -> None:
-        status = "cancelled" if "ExportCancelled" in details else "failed"
+        timeline.stop_timer()
+        cancelled = "ExportCancelled" in details
+        status = "cancelled" if cancelled else "failed"
         self.database.upsert_process(process_id, "export", "Export", status, {})
         self._populate_processes()
-        if status != "cancelled":
-            self._worker_error(error, details)
-        else:
+        timeline.set_overall_status("Cancelled" if cancelled else "Failed", "neutral" if cancelled else "failed")
+        if cancelled:
             self.statusBar().showMessage("Export cancelled", 5000)
+        else:
+            logger.error("export failed: %s\n%s", error, details)
+            self.statusBar().showMessage("Export failed — see timeline for details", 8000)
+
+    def _open_export_process(self, data: dict[str, Any]) -> bool:
+        process_id = str(data.get("process_id") or "")
+        if not process_id.startswith("export:") or str(data.get("status")) == "running":
+            return False
+        _, agent_id, run_id = process_id.split(":", 2)
+        agent = self.agents.get(agent_id)
+        run = next((value for value in self.runs.get(agent_id, []) if value.id == run_id), None)
+        if not agent or not run:
+            return False
+        history = self.database.export_history(agent_id, run_id)
+        if not history:
+            return False
+        self.open_export_history(agent, run, history[0])
+        return True
+
+    def open_export_history(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(28, 24, 28, 24)
+        timeline = ExportTimelineWidget(live=False)
+        number = run.local_number or 0
+        timeline.set_header(
+            f"EXPORT #{export_record['export_number']:03d}", f"Research #{number:03d} · {agent.name}"
+        )
+        state = RUN_STATUS_STATE.get(str(export_record.get("status", "")).casefold(), "neutral")
+        timeline.set_overall_status(str(export_record.get("status", "")).replace("_", " "), state)
+        timeline.load_history(self.database.export_stages(export_record["id"]))
+        page_layout.addWidget(timeline)
+        actions = QHBoxLayout()
+        open_button = QPushButton("Open Folder")
+        open_button.clicked.connect(
+            lambda: open_in_explorer(Path(export_record["path"]))
+        )
+        back = QPushButton("Back to Research")
+        back.clicked.connect(lambda: self.show_run(agent, run))
+        actions.addWidget(open_button)
+        actions.addWidget(back)
+        actions.addStretch()
+        page_layout.addLayout(actions)
+        self._show_page(page)
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)

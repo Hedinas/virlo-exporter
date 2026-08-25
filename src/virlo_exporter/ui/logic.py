@@ -64,6 +64,7 @@ def research_search_text(
     return " ".join(
         (
             display_name or "",
+            f"research #{run.local_number or 0:03d}",
             f"research {run.local_number or 0:03d}",
             agent_name,
             run.id,

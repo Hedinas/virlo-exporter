@@ -40,7 +40,7 @@ class StageTracker:
             "summary": None,
             "detail": detail,
         }
-        self._publish()
+        self._publish(persist=True)
 
     def finish(
         self, status: str = "complete", *, summary: str | None = None, detail: str | None = None
@@ -52,12 +52,30 @@ class StageTracker:
         self.current["summary"] = summary
         if detail is not None:
             self.current["detail"] = detail
-        self._publish()
+        self._publish(persist=True)
 
-    def _publish(self) -> None:
+    def update(
+        self,
+        *,
+        current: int | None = None,
+        total: int | None = None,
+        message: str | None = None,
+    ) -> None:
+        if self.current is None:
+            return
+        if current is not None:
+            self.current["current"] = current
+        if total is not None:
+            self.current["total"] = total
+        if message is not None:
+            self.current["message"] = message
+        self._publish(persist=False)
+
+    def _publish(self, *, persist: bool) -> None:
         assert self.current is not None
         event = dict(self.current)
-        self.database.upsert_export_stage(self.export_id, event)
+        if persist:
+            self.database.upsert_export_stage(self.export_id, event)
         if self.progress:
             self.progress(event)
 
