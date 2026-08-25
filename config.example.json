@@ -1,0 +1,7 @@
+{
+  "api_base_url": "https://api.virlo.ai/v1",
+  "export_folder": "exports",
+  "open_folder_after_export": true,
+  "baseline_sample_size": 150,
+  "refresh_interval": "auto"
+}

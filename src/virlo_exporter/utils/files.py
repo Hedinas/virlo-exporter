@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+WINDOWS_RESERVED = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def safe_filename(value: str, fallback: str = "Untitled", max_length: int = 80) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" .")
+    cleaned = re.sub(r"\s+", " ", cleaned)[:max_length].rstrip(" .")
+    if not cleaned:
+        cleaned = fallback
+    if cleaned.upper() in WINDOWS_RESERVED:
+        cleaned = f"_{cleaned}"
+    return cleaned
+
+
+def open_in_explorer(path: Path) -> None:
+    import os
+
+    os.startfile(str(path.resolve()))  # type: ignore[attr-defined]
