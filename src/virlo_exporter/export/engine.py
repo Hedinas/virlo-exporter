@@ -20,6 +20,7 @@ from virlo_exporter.storage.database import Database
 from virlo_exporter.utils.files import safe_filename
 
 from .dataset import count_platforms, deterministic_baseline, select_high_signal
+from .diagnostics import classify_pagination_warnings
 from .report import build_report, write_report
 from .timeline import StageTracker
 
@@ -111,6 +112,8 @@ class ExportEngine:
         manifest: dict[str, Any] = {"resources": {}, "warnings": [], "errors": []}
         diagnostics: list[dict[str, Any]] = []
         fatal_diagnostics: list[dict[str, Any]] = []
+        notices: list[dict[str, Any]] = []
+        deduplications: list[dict[str, Any]] = []
         resources: dict[str, Any] = {}
         export_dir: Path | None = None
         agent_name = agent_id
@@ -127,12 +130,14 @@ class ExportEngine:
                 "status": status,
                 "started_at": started.isoformat(),
                 "completed_at": datetime.now(UTC).isoformat(),
-                "validation_state": "warnings" if manifest["warnings"] else "valid",
+                "validation_state": "warnings" if diagnostics else "valid",
             }
             summary = {
                 "videos": len(resources.get("videos", [])),
-                "warnings": len(manifest["warnings"]),
-                "errors": len(manifest["errors"]),
+                "warnings": len(diagnostics),
+                "errors": len(fatal_diagnostics) or len(manifest["errors"]),
+                "notices": len(notices),
+                "deduplicated_records": sum(entry["count"] for entry in deduplications),
                 "paid_api_calls": 0,
             }
             summary.update(extra_summary or {})
@@ -143,6 +148,8 @@ class ExportEngine:
                 summary=summary,
                 warnings=diagnostics,
                 errors=fatal_diagnostics,
+                notices=notices,
+                deduplications=deduplications,
             )
             with suppress(OSError):
                 write_report(export_dir, report)
@@ -224,11 +231,18 @@ class ExportEngine:
                     )
                     manifest["resources"][resource] = entry
                     manifest["warnings"].extend(result.warnings)
+                    resource_notices, resource_warnings, resource_dedups = classify_pagination_warnings(
+                        result.warnings
+                    )
+                    notices.extend(resource_notices)
+                    diagnostics.extend(resource_warnings)
+                    deduplications.extend(resource_dedups)
                     log_lines.append(
                         f"OK {resource}: {len(result.records)} records, {result.pages} page(s)"
                     )
                     tracker.finish(
-                        summary=f"{len(result.records):,} record(s) · {result.pages} page(s)"
+                        "warning" if resource_warnings else "complete",
+                        summary=f"{len(result.records):,} record(s) · {result.pages} page(s)",
                     )
                 except VirloError as exc:
                     status = "unavailable" if exc.status_code in {400, 404} else "failed"
@@ -267,8 +281,16 @@ class ExportEngine:
             high_signal, unresolved = select_high_signal(videos, resources)
             baseline = deterministic_baseline(videos, high_signal, self.baseline_sample_size)
             if unresolved:
-                manifest["warnings"].append(
-                    f"{len(unresolved)} evidence video reference(s) were unresolved."
+                message = f"{len(unresolved)} evidence video reference(s) were unresolved."
+                manifest["warnings"].append(message)
+                diagnostics.append(
+                    {
+                        "stage": "selection",
+                        "endpoint": None,
+                        "http_status": None,
+                        "error_code": None,
+                        "message": message,
+                    }
                 )
             tracker.finish(
                 "warning" if unresolved else "complete",
@@ -305,11 +327,14 @@ class ExportEngine:
                 for message in validation_warnings
             )
             complete = True
+            has_real_warnings = bool(diagnostics)
             if manifest["warnings"]:
                 dataset["_export_status"] = {
                     "complete": complete,
-                    "complete_with_warnings": complete,
+                    "complete_with_warnings": has_real_warnings,
                     "warnings": manifest["warnings"],
+                    "notices": notices,
+                    "deduplications": deduplications,
                 }
                 dataset["_manifest"] = manifest
                 self._write_json(dataset_path, dataset)
@@ -325,9 +350,9 @@ class ExportEngine:
             self.database.update_export(
                 export_id,
                 path=str(export_dir),
-                status="complete_with_warnings" if manifest["warnings"] else "complete",
+                status="complete_with_warnings" if has_real_warnings else "complete",
                 completed_at=completed,
-                validation="warnings" if manifest["warnings"] else "valid",
+                validation="warnings" if has_real_warnings else "valid",
             )
             raw_size = sum(path.stat().st_size for path in raw_dir.glob("*.json"))
             statistics = {
@@ -337,20 +362,24 @@ class ExportEngine:
                 "videos": len(videos),
                 "high_signal": len(high_signal),
                 "baseline": len(baseline),
-                "warnings": len(manifest["warnings"]),
+                "warnings": len(diagnostics),
+                "notices": len(notices),
+                "deduplicated_records": sum(entry["count"] for entry in deduplications),
                 "paid_api_calls": 0,
             }
             tracker.finish(
-                "warning" if manifest["warnings"] else "complete",
-                summary=(f"Complete with {len(manifest['warnings'])} warning(s)" if manifest["warnings"] else "Export complete"),
+                "warning" if has_real_warnings else "complete",
+                summary=(f"Complete with {len(diagnostics)} warning(s)" if has_real_warnings else "Export complete"),
             )
             save_report(
-                "complete_with_warnings" if manifest["warnings"] else "complete",
+                "complete_with_warnings" if has_real_warnings else "complete",
                 extra_summary={
                     "raw_bytes": statistics["raw_bytes"],
                     "dataset_bytes": statistics["dataset_bytes"],
                     "high_signal_videos": statistics["high_signal"],
                     "baseline_videos": statistics["baseline"],
+                    "notices": statistics["notices"],
+                    "deduplicated_records": statistics["deduplicated_records"],
                 },
             )
             return ExportResult(

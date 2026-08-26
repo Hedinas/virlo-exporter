@@ -148,3 +148,43 @@ def test_stage_event_sequence_and_history_persistence(tmp_path) -> None:
     assert all(row["status"] != "running" for row in persisted)
     videos_row = next(row for row in persisted if row["stage"] == "videos")
     assert videos_row["status"] == "complete"
+
+
+class DuplicateHeavyFakeClient(FakeClient):
+    """Reproduces the real Export #003 pattern: pagination boundary overlap
+    produces "Duplicate id skipped" + a fully-explained "Expected N;
+    received M" warning for one resource -- harmless, should not surface
+    as a real warning or flip the status to complete_with_warnings."""
+
+    def get_resource(self, agent_id: str, resource: str, **_kwargs) -> PageResult:
+        if resource == "sounds":
+            return PageResult(
+                records=[{"id": str(i)} for i in range(10)],
+                pages=3,
+                warnings=[
+                    "Duplicate sounds id skipped: a",
+                    "Duplicate sounds id skipped: b",
+                    "Expected 12 sounds records; received 10.",
+                ],
+            )
+        return super().get_resource(agent_id, resource, **_kwargs)
+
+
+def test_harmless_duplicate_ids_do_not_produce_warnings_or_flip_status(tmp_path) -> None:
+    db = Database(tmp_path / "state.db")
+    db.assign_runs("agent-1", [{"id": "run-1", "started_at": "2026-01-01"}])
+    result = ExportEngine(
+        DuplicateHeavyFakeClient(), db, tmp_path / "exports", baseline_sample_size=20
+    ).export("agent-1", "run-1")
+
+    history = db.export_history("agent-1", "run-1")
+    assert history[0]["status"] == "complete"  # not complete_with_warnings
+
+    report = json.loads((result.path / "EXPORT_REPORT.json").read_text(encoding="utf-8"))
+    assert report["export"]["status"] == "complete"
+    assert report["warnings"] == []
+    assert report["deduplications"] == [{"resource": "sounds", "count": 2}]
+    assert len(report["notices"]) == 1
+    assert report["notices"][0]["resource"] == "sounds"
+    assert report["summary"]["warnings"] == 0
+    assert report["summary"]["deduplicated_records"] == 2

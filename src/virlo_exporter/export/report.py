@@ -41,6 +41,8 @@ def build_report(
     summary: dict[str, Any] | None = None,
     warnings: list[dict[str, Any]] | None = None,
     errors: list[dict[str, Any]] | None = None,
+    notices: list[dict[str, Any]] | None = None,
+    deduplications: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     stage_entries = [
         {
@@ -77,6 +79,8 @@ def build_report(
         "summary": summary or {},
         "warnings": clean(warnings),
         "errors": clean(errors),
+        "notices": clean(notices),
+        "deduplications": clean(deduplications),
         "stages": stage_entries,
         "validation": {"validation_state": export_row.get("validation_state")},
     }
