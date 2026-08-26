@@ -86,14 +86,18 @@ def test_open_folder_targets_the_exact_export_directory_not_documents(tmp_path, 
     assert export_dir.name.startswith("Export_")
 
 
-def test_permanent_delete_removes_directory_db_row_and_keeps_numbering(tmp_path, qapp) -> None:
+def test_delete_sends_directory_to_recycle_bin_keeps_db_row_gone_and_numbering(
+    tmp_path, qapp, monkeypatch
+) -> None:
     window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
     assert export_dir.exists()
     window._confirm_delete_export = lambda *args: True
+    sent: list[str] = []
+    monkeypatch.setattr("virlo_exporter.ui.main_window.delete_directory", lambda path: sent.append(str(path)))
 
-    window.delete_export_permanently(agent, run, export_record)
+    window.delete_export_to_recycle_bin(agent, run, export_record)
 
-    assert not export_dir.exists()
+    assert sent == [str(export_dir)]  # sent to Recycle Bin, not shutil.rmtree'd in-process
     assert window.database.export_history("agent-1", "run-1") == []
     _, next_number = window.database.begin_export("agent-1", "run-1", 1, "p", "2026-01-01")
     assert next_number == 2  # export #1 was deleted, but its number is never reissued
@@ -107,7 +111,7 @@ def test_delete_is_refused_while_export_is_running(tmp_path, qapp, monkeypatch) 
 
     monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
 
-    window.delete_export_permanently(agent, run, export_record)
+    window.delete_export_to_recycle_bin(agent, run, export_record)
 
     assert export_dir.exists()  # nothing was touched
     assert window.database.export_history("agent-1", "run-1")
@@ -126,20 +130,19 @@ def test_export_card_shows_files_missing_when_directory_is_gone(tmp_path, qapp) 
     assert any("Files missing" in text for text in labels)
 
 
-def test_completion_dialog_shows_real_warning_count_not_raw_string_count(tmp_path, qapp, monkeypatch) -> None:
+def test_completion_overlay_shows_real_warning_count_not_raw_string_count(tmp_path, qapp, monkeypatch) -> None:
+    from PySide6.QtWidgets import QLabel
+
     from virlo_exporter.export.engine import ExportResult
-    from virlo_exporter.ui.main_window import ExportCompletionDialog
+    from virlo_exporter.ui.main_window import ExportCompletionOverlay
 
     window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
     process_id = f"export:{agent.id}:{run.id}"
     window._live_export_events[process_id] = []
-
-    shown: list[ExportCompletionDialog] = []
-    monkeypatch.setattr(ExportCompletionDialog, "exec", lambda self: shown.append(self))
     monkeypatch.setattr("virlo_exporter.ui.main_window.open_in_explorer", lambda path: None)
 
     # Raw manifest warnings (dataset audit trail) has entries, but the real
-    # (structured) warning count -- what the completion dialog must use -- is 0.
+    # (structured) warning count -- what the completion overlay must use -- is 0.
     result = ExportResult(
         path=export_dir,
         dataset_path=export_dir / "VIRLO_AI_DATASET.json",
@@ -154,6 +157,9 @@ def test_completion_dialog_shows_real_warning_count_not_raw_string_count(tmp_pat
 
     window._export_done(process_id, result, agent, run)
 
-    assert len(shown) == 1
-    dialog = shown[0]
-    assert dialog.windowTitle() == "Export complete"  # not "Export failed"/warnings framing
+    overlays = window.centralWidget().findChildren(ExportCompletionOverlay)
+    assert len(overlays) == 1
+    title_text = next(
+        label.text() for label in overlays[0].findChildren(QLabel) if label.objectName() == "completionTitle"
+    )
+    assert title_text == "✓ EXPORT COMPLETE"  # not warnings/failed framing

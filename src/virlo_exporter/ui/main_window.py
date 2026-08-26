@@ -904,6 +904,22 @@ class MainWindow(QMainWindow):
             run = next((value for value in self.runs.get(agent_id, []) if value.id == run_id), None)
             if agent and run:
                 self.show_run(agent, run)
+        elif kind == "process":
+            # A background refresh must not silently strand the user on a
+            # live Process view -- find the same process's (now rebuilt)
+            # sidebar row and reopen it, rather than leaving the page
+            # pointing at process_list items that no longer exist.
+            _, process_kind, agent_id, process_id = self._current_page
+            for index in range(self.process_list.count()):
+                item = self.process_list.item(index)
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if (
+                    isinstance(data, dict)
+                    and data.get("kind") == process_kind
+                    and (data.get("agent_id") == agent_id or data.get("process_id") == process_id)
+                ):
+                    self._process_selected(item)
+                    return
 
     def _populate_agents(self, records: list[dict[str, Any]]) -> None:
         current = self.selected_agent_id
@@ -917,6 +933,14 @@ class MainWindow(QMainWindow):
 
     def _render_agent_list(self, current: str | None = None) -> None:
         current = current or self.selected_agent_id
+        # selected_agent_id also tracks which agent owns the currently open
+        # Research/Run page (show_run sets it too, so "New Research" etc.
+        # still know the right agent) -- but the Agent row itself must only
+        # actually highlight while genuinely on the Agent Detail page, or a
+        # periodic background refresh spontaneously re-lights a stale agent
+        # row while the user is looking at Research or a Process view.
+        if self._current_page[:1] != ("agent",):
+            current = None
         self.agent_list.blockSignals(True)
         self.agent_list.clear()
         if not self.agents:
@@ -961,6 +985,20 @@ class MainWindow(QMainWindow):
             if isinstance(row, AgentRow):
                 row.set_selected(item is current)
 
+    @staticmethod
+    def _process_keys_match(a: Any, b: Any) -> bool:
+        """`a`/`b` may be a bare selection key (kind/agent_id/process_id) or
+        the full merged row payload stored as item data -- compare only the
+        identity fields both shapes share, never full dict equality (a
+        merged payload always has extra keys a bare key doesn't, so `==`
+        between the two is always False and silently drops the selection
+        highlight on every list rebuild)."""
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return False
+        return a.get("kind") == b.get("kind") and (
+            a.get("agent_id") == b.get("agent_id") or a.get("process_id") == b.get("process_id")
+        )
+
     def _populate_processes(self) -> None:
         current = self.process_list.currentItem()
         current_key = current.data(Qt.ItemDataRole.UserRole) if current else None
@@ -989,12 +1027,15 @@ class MainWindow(QMainWindow):
                 row = ProcessRow(f"Research{number} · {agent.name}", phase)
                 self.process_list.addItem(item)
                 self.process_list.setItemWidget(item, row)
-                if key == current_key:
+                if self._process_keys_match(key, current_key):
                     self.process_list.setCurrentItem(item)
         for process in self.database.active_processes():
             key = {"kind": "local", "process_id": process["process_id"]}
             item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, {**key, **process})
+            # `process` has its own "kind" column (the process *type*, e.g.
+            # "export") that must not clobber the "local" selection-category
+            # tag -- `key` is merged in last so it always wins that collision.
+            item.setData(Qt.ItemDataRole.UserRole, {**process, **key})
             item.setSizeHint(QSize(220, 62))
             payload = process.get("payload") if isinstance(process.get("payload"), dict) else {}
             secondary = str(payload.get("stage") or process["status"]).replace("_", " ").title()
@@ -1003,7 +1044,7 @@ class MainWindow(QMainWindow):
             row = ProcessRow(process["label"], secondary)
             self.process_list.addItem(item)
             self.process_list.setItemWidget(item, row)
-            if key == current_key:
+            if self._process_keys_match(key, current_key):
                 self.process_list.setCurrentItem(item)
         if self.process_list.count() == 0:
             item = QListWidgetItem("No active processes")
@@ -1222,6 +1263,8 @@ class MainWindow(QMainWindow):
                 return
 
     def show_agent(self, agent_id: str) -> None:
+        is_refresh = self._current_page == ("agent", agent_id)
+        saved_scroll = self._capture_detail_scroll_state() if is_refresh else {}
         self.selected_agent_id = agent_id
         self._current_page = ("agent", agent_id)
         self._clear_active_export_view()
@@ -1377,6 +1420,7 @@ class MainWindow(QMainWindow):
         scroll.setWidget(body)
         page_layout.addWidget(scroll)
         self._show_page(page)
+        self._restore_detail_scroll_state(saved_scroll)
 
     def _run_card(self, agent: Agent, run: Run) -> QFrame:
         frame, layout = card()
@@ -1615,6 +1659,8 @@ class MainWindow(QMainWindow):
         return frame
 
     def show_run(self, agent: Agent, run: Run) -> None:
+        is_refresh = self._current_page == ("run", agent.id, run.id)
+        saved_scroll = self._capture_detail_scroll_state() if is_refresh else {}
         self.selected_agent_id = agent.id
         self._current_page = ("run", agent.id, run.id)
         self._clear_active_export_view()
@@ -1780,6 +1826,7 @@ class MainWindow(QMainWindow):
         scroll.setWidget(body)
         root.addWidget(scroll)
         self._show_page(page)
+        self._restore_detail_scroll_state(saved_scroll)
 
     def show_new_agent(self) -> None:
         if not self.client:
@@ -2239,6 +2286,43 @@ class MainWindow(QMainWindow):
             if widget not in {self.placeholder, page}:
                 self.detail.removeWidget(widget)
                 widget.deleteLater()
+
+    def _capture_detail_scroll_state(self) -> dict[str, int]:
+        """Show_agent/show_run fully rebuild their page from scratch on
+        every call, including on every periodic background refresh -- which
+        silently reset scroll position to the top every time. Called before
+        that rebuild, this remembers where the user was scrolled to."""
+        state: dict[str, int] = {}
+        current = self.detail.currentWidget()
+        if current is None:
+            return state
+        scroll_area = current.findChild(QScrollArea)
+        if scroll_area is not None:
+            state["page"] = scroll_area.verticalScrollBar().value()
+        keyword_list = current.findChild(QListWidget, "keywordDetailList")
+        if keyword_list is not None:
+            state["keywords"] = keyword_list.verticalScrollBar().value()
+        return state
+
+    def _restore_detail_scroll_state(self, state: dict[str, int]) -> None:
+        if not state:
+            return
+        # Scrollbar ranges aren't final until the new page has actually been
+        # laid out, so defer the restore to the next event loop turn.
+        QTimer.singleShot(0, lambda: self._apply_detail_scroll_state(state))
+
+    def _apply_detail_scroll_state(self, state: dict[str, int]) -> None:
+        current = self.detail.currentWidget()
+        if current is None:
+            return
+        if "page" in state:
+            scroll_area = current.findChild(QScrollArea)
+            if scroll_area is not None:
+                scroll_area.verticalScrollBar().setValue(state["page"])
+        if "keywords" in state:
+            keyword_list = current.findChild(QListWidget, "keywordDetailList")
+            if keyword_list is not None:
+                keyword_list.verticalScrollBar().setValue(state["keywords"])
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.ui_settings.setValue("ui/main_window_geometry", self.saveGeometry())
