@@ -351,6 +351,10 @@ class ExportTimelineWidget(QWidget):
         if self._elapsed_timer:
             self._elapsed_timer.stop()
 
+    @property
+    def elapsed_seconds(self) -> int:
+        return self._elapsed_seconds
+
     def set_overall_status(self, text: str, state: str) -> None:
         self.status_badge_label.setText(text.upper())
         self.status_badge_label.setProperty("state", state)
@@ -413,36 +417,3 @@ def format_bytes(value: Any) -> str:
     return f"{number:.1f} GB"
 
 
-def build_completion_summary(
-    *, status_text: str, state: str, stats: dict[str, Any], warnings: list[str]
-) -> QFrame:
-    from .main_window import card, metric_card, section_label  # local import avoids a cycle
-
-    frame, layout = card()
-    layout.addWidget(section_label("Export result"))
-    badge = QLabel(status_text.upper())
-    badge.setObjectName("statusBadge")
-    badge.setProperty("state", state)
-    layout.addWidget(badge)
-
-    size = format_bytes
-    metrics_row = QHBoxLayout()
-    metrics_row.setSpacing(10)
-    for label_text, value_text in (
-        ("RAW Data", size(stats.get("raw_bytes"))),
-        ("AI Dataset", size(stats.get("dataset_bytes"))),
-        ("Raw Videos", f"{stats.get('videos', 0):,}"),
-        ("High-signal Videos", f"{stats.get('high_signal', 0):,}"),
-        ("Baseline Videos", f"{stats.get('baseline', 0):,}"),
-        ("Warnings", str(len(warnings))),
-        ("Paid API Calls", str(stats.get("paid_api_calls", 0))),
-    ):
-        metrics_row.addWidget(metric_card(label_text, value_text))
-    layout.addLayout(metrics_row)
-    if warnings:
-        warning_box, warning_layout = card()
-        warning_layout.addWidget(section_label("Warnings"))
-        for message in warnings:
-            warning_layout.addWidget(_muted(f"⚠ {message}"))
-        layout.addWidget(warning_box)
-    return frame

@@ -124,3 +124,36 @@ def test_export_card_shows_files_missing_when_directory_is_gone(tmp_path, qapp) 
     card = window._export_card(agent, run, export_record)
     labels = [label.text() for label in card.findChildren(QLabel)]
     assert any("Files missing" in text for text in labels)
+
+
+def test_completion_dialog_shows_real_warning_count_not_raw_string_count(tmp_path, qapp, monkeypatch) -> None:
+    from virlo_exporter.export.engine import ExportResult
+    from virlo_exporter.ui.main_window import ExportCompletionDialog
+
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    process_id = f"export:{agent.id}:{run.id}"
+    window._live_export_events[process_id] = []
+
+    shown: list[ExportCompletionDialog] = []
+    monkeypatch.setattr(ExportCompletionDialog, "exec", lambda self: shown.append(self))
+    monkeypatch.setattr("virlo_exporter.ui.main_window.open_in_explorer", lambda path: None)
+
+    # Raw manifest warnings (dataset audit trail) has entries, but the real
+    # (structured) warning count -- what the completion dialog must use -- is 0.
+    result = ExportResult(
+        path=export_dir,
+        dataset_path=export_dir / "VIRLO_AI_DATASET.json",
+        complete=True,
+        warnings=["Duplicate videos id skipped: a", "Duplicate videos id skipped: b"],
+        manifest={},
+        export_id=export_record["id"],
+        export_number=export_record["export_number"],
+        research_number=1,
+        statistics={"warnings": 0, "videos": 100, "high_signal": 10, "baseline": 5, "paid_api_calls": 0},
+    )
+
+    window._export_done(process_id, result, agent, run)
+
+    assert len(shown) == 1
+    dialog = shown[0]
+    assert dialog.windowTitle() == "Export complete"  # not "Export failed"/warnings framing

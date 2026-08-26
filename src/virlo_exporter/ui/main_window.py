@@ -71,7 +71,7 @@ from .dialogs import (
     SettingsDialog,
     show_error,
 )
-from .export_view import ExportTimelineWidget, build_completion_summary, format_bytes
+from .export_view import ExportTimelineWidget, format_bytes
 from .logic import agent_display_status, research_search_text, run_timestamp
 
 logger = logging.getLogger(__name__)
@@ -173,6 +173,83 @@ class ClickableStatusBadge(QLabel):
     def mousePressEvent(self, event: Any) -> None:
         self.clicked.emit()
         super().mousePressEvent(event)
+
+
+class ExportCompletionDialog(QDialog):
+    """Compact, centered completion notice -- not the old full-page
+    inline summary. Closing it (the top-right x, or Escape) always
+    returns to the Research Detail it was launched from."""
+
+    def __init__(
+        self,
+        *,
+        state: str,
+        duration_seconds: int,
+        stats: dict[str, Any],
+        warning_count: int,
+        folder_path: Path,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Export complete" if state != "failed" else "Export failed")
+        self.setFixedWidth(560)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        top = QHBoxLayout()
+        icon = "✓" if state == "completed" else "⚠" if state == "warning" else "✕"
+        status_text = {
+            "completed": "EXPORT COMPLETE",
+            "warning": "EXPORT COMPLETE WITH WARNINGS",
+            "failed": "EXPORT FAILED",
+        }.get(state, "EXPORT COMPLETE")
+        title = QLabel(f"{icon} {status_text}")
+        title.setObjectName("title")
+        top.addWidget(title)
+        top.addStretch()
+        close_button = QToolButton()
+        close_button.setObjectName("modalCloseButton")
+        close_button.setText("×")
+        close_button.clicked.connect(self.reject)
+        top.addWidget(close_button)
+        layout.addLayout(top)
+
+        minutes, seconds = divmod(max(0, duration_seconds), 60)
+        layout.addWidget(muted(f"{minutes}m {seconds:02d}s"))
+
+        metrics_row1 = QHBoxLayout()
+        metrics_row1.setSpacing(10)
+        metrics_row1.addWidget(metric_card("RAW Data", format_bytes(stats.get("raw_bytes"))))
+        metrics_row1.addWidget(metric_card("AI Dataset", format_bytes(stats.get("dataset_bytes"))))
+        layout.addLayout(metrics_row1)
+
+        metrics_row2 = QHBoxLayout()
+        metrics_row2.setSpacing(10)
+        for label_text, value in (
+            ("Videos", stats.get("videos", 0)),
+            ("High Signal", stats.get("high_signal", 0)),
+            ("Baseline", stats.get("baseline", 0)),
+            ("Warnings", warning_count),
+        ):
+            metrics_row2.addWidget(metric_card(label_text, f"{value:,}"))
+        layout.addLayout(metrics_row2)
+
+        actions = QHBoxLayout()
+        open_button = QPushButton("Open Folder")
+        open_button.setObjectName("primary")
+        open_button.clicked.connect(lambda: open_in_explorer(folder_path))
+        actions.addWidget(open_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+    def center_over(self, widget: QWidget) -> None:
+        self.adjustSize()
+        center = widget.geometry().center() if widget.isVisible() else widget.rect().center()
+        global_center = widget.mapToGlobal(widget.rect().center()) if widget.isVisible() else center
+        frame = self.frameGeometry()
+        frame.moveCenter(global_center)
+        self.move(frame.topLeft())
 
 
 RUN_STATUS_STATE = {
@@ -1924,44 +2001,33 @@ class MainWindow(QMainWindow):
         )
         self._live_export_events.pop(process_id, None)
         self._populate_processes()
+        warning_count = int(result.statistics.get("warnings", 0))
+        has_warnings = warning_count > 0
+        state = "warning" if has_warnings else "completed"
         timeline = self._current_export_timeline(process_id)
-        if timeline is None:
-            return
-        timeline.stop_timer()
-        has_warnings = bool(result.warnings)
-        timeline.set_overall_status(
-            "Complete with warnings" if has_warnings else "Complete",
-            "warning" if has_warnings else "completed",
-        )
-        summary = build_completion_summary(
-            status_text="Export complete with warnings" if has_warnings else "Export complete",
-            state="warning" if has_warnings else "completed",
-            stats=result.statistics,
-            warnings=result.warnings,
-        )
-        actions = QHBoxLayout()
-        open_button = QPushButton("Open Folder")
-        open_button.setObjectName("primary")
-        open_button.clicked.connect(lambda: open_in_explorer(result.path))
-        copy = QPushButton("Copy Dataset Path")
-        copy.clicked.connect(lambda: QApplication.clipboard().setText(str(result.dataset_path)))
-        report_button = QPushButton("Report")
-        report_button.clicked.connect(
-            lambda: self.reveal_export_report(
-                agent, run, self.database.export_history(agent.id, run.id)[0]
+        duration_seconds = 0
+        if timeline is not None:
+            timeline.stop_timer()
+            duration_seconds = timeline.elapsed_seconds
+            timeline.set_overall_status(
+                "Complete with warnings" if has_warnings else "Complete", state
             )
-        )
-        back = QPushButton("Back to Research")
-        back.clicked.connect(lambda: self.show_run(agent, run))
-        actions.addWidget(open_button)
-        actions.addWidget(copy)
-        actions.addWidget(report_button)
-        actions.addWidget(back)
-        actions.addStretch()
-        summary.layout().addLayout(actions)
-        timeline.layout().addWidget(summary)
         if self.settings.open_folder_after_export:
             open_in_explorer(result.path)
+        dialog = ExportCompletionDialog(
+            state=state,
+            duration_seconds=duration_seconds,
+            stats=result.statistics,
+            warning_count=warning_count,
+            folder_path=result.path,
+            parent=self,
+        )
+        dialog.center_over(self)
+        dialog.exec()
+        # Closing the completion modal always returns to this export's own
+        # Research Detail, regardless of what page happened to be open when
+        # the export actually finished in the background.
+        self.show_run(agent, run)
 
     def _export_failed(
         self, process_id: str, error: Exception | str, details: str

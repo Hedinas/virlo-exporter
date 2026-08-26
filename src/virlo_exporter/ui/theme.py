@@ -173,6 +173,11 @@ QFrame#sidebarSectionHeader:hover { background: #171A20; }
 QLabel#sectionHeading {
     font-size: 13px; font-weight: 700; letter-spacing: 0.5px; color: #E5E7EB;
 }
+QToolButton#modalCloseButton {
+    background: transparent; border: none; color: #9CA3AF; font-size: 20px;
+    min-width: 28px; max-width: 28px; padding: 0px;
+}
+QToolButton#modalCloseButton:hover { color: #F3F4F6; background: #232832; border-radius: 6px; }
 QToolButton#gearButton, QToolButton#pencilButton {
     background: transparent; border: none; color: #788291; font-size: 15px;
     min-width: 26px; max-width: 26px; padding: 4px;
