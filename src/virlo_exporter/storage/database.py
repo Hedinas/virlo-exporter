@@ -191,10 +191,23 @@ class Database:
     def export_history(self, agent_id: str, run_id: str) -> list[dict[str, Any]]:
         with self.connect() as db:
             rows = db.execute(
-                "SELECT * FROM exports WHERE agent_id=? AND run_id=? ORDER BY export_number DESC",
+                "SELECT * FROM exports WHERE agent_id=? AND run_id=? AND status!='deleted' "
+                "ORDER BY export_number DESC",
                 (agent_id, run_id),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def delete_export(self, export_id: int) -> None:
+        """Permanently remove an export's local records. The exports row
+        itself is kept as a tombstone (status='deleted', path cleared) so
+        export_number stays monotonic -- a deleted #006 is never reissued
+        to a later export. Only stage history is actually deleted; callers
+        are responsible for removing the export's directory from disk."""
+        with self._lock, self.connect() as db:
+            db.execute("DELETE FROM export_stages WHERE export_id=?", (export_id,))
+            db.execute(
+                "UPDATE exports SET status='deleted', path='' WHERE id=?", (export_id,)
+            )
 
     def upsert_export_stage(self, export_id: int, event: dict[str, Any]) -> None:
         with self._lock, self.connect() as db:

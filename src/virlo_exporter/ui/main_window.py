@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QToolButton,
@@ -48,16 +49,28 @@ from virlo_exporter.models import Agent, Run
 from virlo_exporter.services.workers import Worker
 from virlo_exporter.storage.database import Database
 from virlo_exporter.storage.key_store import ApiKeyStore
-from virlo_exporter.utils.files import open_in_explorer, reveal_in_explorer
+from virlo_exporter.utils.files import (
+    delete_directory,
+    directory_size,
+    open_in_explorer,
+    reveal_in_explorer,
+)
 
 from .components import (
     AgentEditorDialog,
     CollapsibleSection,
+    FlowLayout,
     NewResearchDialog,
     RenameDialog,
     ensure_visible,
 )
-from .dialogs import ApiKeyDialog, PaidConfirmationDialog, SettingsDialog, show_error
+from .dialogs import (
+    ApiKeyDialog,
+    ExportDiagnosticsDialog,
+    PaidConfirmationDialog,
+    SettingsDialog,
+    show_error,
+)
 from .export_view import ExportTimelineWidget, build_completion_summary, format_bytes
 from .logic import agent_display_status, research_search_text, run_timestamp
 
@@ -129,6 +142,7 @@ def pill(text: str) -> QLabel:
 def mini_card(label_text: str, value_text: str, state: str = "neutral") -> QFrame:
     frame = QFrame()
     frame.setObjectName("miniCard")
+    frame.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
     layout = QVBoxLayout(frame)
     layout.setContentsMargins(12, 10, 12, 10)
     layout.setSpacing(4)
@@ -174,6 +188,7 @@ RUN_STATUS_STATE = {
 def metric_card(label_text: str, value_text: str) -> QFrame:
     frame = QFrame()
     frame.setObjectName("metricCard")
+    frame.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
     layout = QVBoxLayout(frame)
     layout.setContentsMargins(14, 11, 14, 11)
     layout.setSpacing(3)
@@ -1271,50 +1286,134 @@ class MainWindow(QMainWindow):
         return frame
 
     @staticmethod
-    def _read_export_summary(export_dir: str) -> dict[str, Any]:
+    def _read_export_report_payload(export_dir: str) -> dict[str, Any]:
         path = Path(export_dir) / export_report.REPORT_FILENAME
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
-        summary = payload.get("summary")
+        return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _read_export_summary(cls, export_dir: str) -> dict[str, Any]:
+        summary = cls._read_export_report_payload(export_dir).get("summary")
         return summary if isinstance(summary, dict) else {}
 
-    def reveal_export_report(
-        self, agent: Agent, run: Run, export_record: dict[str, Any]
-    ) -> None:
+    def _ensure_report_path(self, agent: Agent, export_record: dict[str, Any]) -> Path | None:
         export_dir = Path(export_record["path"])
         if not export_dir.exists():
             show_error(self, "Export folder missing", "This export's folder no longer exists on disk.")
-            return
-        path = export_report.ensure_report(
+            return None
+        return export_report.ensure_report(
             export_dir,
             export_row=export_record,
             stages=self.database.export_stages(export_record["id"]),
             agent_name=agent.name,
         )
-        reveal_in_explorer(path)
+
+    def open_export_report(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+        """"Report" = open EXPORT_REPORT.json itself in its default app."""
+        path = self._ensure_report_path(agent, export_record)
+        if path is not None:
+            open_in_explorer(path)
+
+    def reveal_export_report(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+        """"Show File" = reveal EXPORT_REPORT.json selected in Explorer."""
+        path = self._ensure_report_path(agent, export_record)
+        if path is not None:
+            reveal_in_explorer(path)
+
+    def show_export_diagnostics(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+        payload = self._read_export_report_payload(export_record["path"])
+        dialog = ExportDiagnosticsDialog(
+            export_record["export_number"],
+            payload.get("errors") or [],
+            payload.get("warnings") or [],
+            payload.get("notices") or [],
+            self,
+        )
+        dialog.openReportRequested.connect(lambda: self.open_export_report(agent, run, export_record))
+        dialog.exec()
+
+    def _confirm_delete_export(self, number: int, research_number: int, size_text: str) -> bool:
+        """Isolated so tests can stub the modal confirmation without
+        blocking on a real QMessageBox event loop."""
+        message = (
+            f"This will permanently delete all local files for this export.\n\n"
+            f"Files: ~{size_text}\n\n"
+            f"Research #{research_number:03d} and Virlo data will NOT be deleted.\n\n"
+            "This cannot be undone."
+        )
+        confirm = QMessageBox(self)
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setWindowTitle(f"Permanently delete Export #{number:03d}?")
+        confirm.setText(f"PERMANENTLY DELETE EXPORT #{number:03d}?")
+        confirm.setInformativeText(message)
+        delete_button = confirm.addButton("Delete Permanently", QMessageBox.ButtonRole.DestructiveRole)
+        confirm.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        confirm.setDefaultButton(delete_button)
+        confirm.exec()
+        return confirm.clickedButton() is delete_button
+
+    def delete_export_permanently(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+        if str(export_record["status"]) == "running":
+            QMessageBox.information(
+                self, "Export is running", "Cancel the export first, then delete it once it has stopped."
+            )
+            return
+        export_dir = Path(export_record["path"]) if export_record["path"] else None
+        size_text = format_bytes(directory_size(export_dir)) if export_dir and export_dir.exists() else "0 B"
+        if not self._confirm_delete_export(
+            export_record["export_number"], export_record.get("research_number", 0), size_text
+        ):
+            return
+        if export_dir is not None:
+            delete_directory(export_dir)
+        self.database.delete_export(export_record["id"])
+        self.show_run(agent, run)
 
     def _export_card(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> QFrame:
         frame, layout = card()
+        frame.setMaximumWidth(480)
         status = str(export_record["status"])
         state = RUN_STATUS_STATE.get(status.casefold(), "neutral")
+        export_dir = Path(export_record["path"]) if export_record["path"] else None
+        files_missing = export_dir is None or not export_dir.exists()
+
         top = QHBoxLayout()
         title = QLabel(f"Export #{export_record['export_number']:03d}")
         title.setObjectName("cardTitle")
         top.addWidget(title)
         top.addStretch()
         badge = ClickableStatusBadge(status.replace("_", " "), state)
-        if status in {"failed", "complete_with_warnings"}:
-            badge.setToolTip("Open EXPORT_REPORT.json")
+        if status in {"failed", "complete_with_warnings"} and not files_missing:
+            badge.setToolTip("Click for diagnostic details")
             badge.clicked.connect(
-                lambda _=False, record=export_record: self.reveal_export_report(agent, run, record)
+                lambda _=False, record=export_record: self.show_export_diagnostics(agent, run, record)
             )
         top.addWidget(badge)
         layout.addLayout(top)
         layout.addWidget(
             muted(human_date(export_record.get("completed_at") or export_record.get("started_at")))
         )
+
+        if files_missing:
+            layout.addWidget(muted("Files missing — this export's local folder no longer exists."))
+            actions = QHBoxLayout()
+            view_button = QPushButton("View Process")
+            view_button.clicked.connect(
+                lambda _=False, record=export_record: self.open_export_history(agent, run, record)
+            )
+            actions.addWidget(view_button)
+            actions.addStretch()
+            delete_button = QPushButton("Delete")
+            delete_button.setObjectName("danger")
+            delete_button.clicked.connect(
+                lambda _=False, record=export_record: self.delete_export_permanently(agent, run, record)
+            )
+            actions.addWidget(delete_button)
+            layout.addLayout(actions)
+            return frame
 
         summary = self._read_export_summary(export_record["path"])
         metrics: list[tuple[str, str]] = []
@@ -1324,13 +1423,17 @@ class MainWindow(QMainWindow):
             metrics.append(("RAW Data", format_bytes(summary["raw_bytes"])))
         if "videos" in summary:
             metrics.append(("Videos", f"{summary['videos']:,}"))
-        metrics.append(("Warnings", str(summary.get("warnings", 0))))
-        if metrics:
-            metrics_row = QHBoxLayout()
-            metrics_row.setSpacing(8)
+        if summary.get("warnings"):
+            metrics.append(("Warnings", str(summary["warnings"])))
+        if not metrics:
+            layout.addWidget(muted("No export data produced."))
+        else:
+            metrics_row = FlowLayout(spacing=8)
+            metrics_host = QWidget()
+            metrics_host.setLayout(metrics_row)
             for label_text, value_text in metrics:
                 metrics_row.addWidget(metric_card(label_text, value_text))
-            layout.addLayout(metrics_row)
+            layout.addWidget(metrics_host)
 
         actions = QHBoxLayout()
         view_button = QPushButton("View Process")
@@ -1343,12 +1446,18 @@ class MainWindow(QMainWindow):
             lambda _=False, path=export_record["path"]: open_in_explorer(Path(path))
         )
         actions.addWidget(open_button)
-        actions.addStretch()
         report_button = QPushButton("Report")
         report_button.clicked.connect(
-            lambda _=False, record=export_record: self.reveal_export_report(agent, run, record)
+            lambda _=False, record=export_record: self.open_export_report(agent, run, record)
         )
         actions.addWidget(report_button)
+        actions.addStretch()
+        delete_button = QPushButton("Delete")
+        delete_button.setObjectName("danger")
+        delete_button.clicked.connect(
+            lambda _=False, record=export_record: self.delete_export_permanently(agent, run, record)
+        )
+        actions.addWidget(delete_button)
         layout.addLayout(actions)
         return frame
 
@@ -1499,8 +1608,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(card_heading("Exports"))
         if not history:
             layout.addWidget(muted("No local exports yet."))
-        for item in history:
-            layout.addWidget(self._export_card(agent, run, item))
+        else:
+            exports_flow = FlowLayout(spacing=14)
+            exports_host = QWidget()
+            exports_host.setLayout(exports_flow)
+            for item in history:
+                exports_flow.addWidget(self._export_card(agent, run, item))
+            layout.addWidget(exports_host)
         layout.addStretch()
         scroll.setWidget(body)
         root.addWidget(scroll)

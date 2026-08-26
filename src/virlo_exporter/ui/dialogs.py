@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -219,3 +222,77 @@ class ErrorDialog(PersistentDialog):
 
 def show_error(parent: QWidget, title: str, message: str, technical: str = "") -> None:
     ErrorDialog(title, message, technical, parent).exec()
+
+
+class ExportDiagnosticsDialog(PersistentDialog):
+    """Dark, safe-technical-detail view of one export's warnings/errors,
+    surfaced from a click on a stage block or a failed/warning status
+    badge. The primary next step it offers is always the full report."""
+
+    openReportRequested = Signal()
+
+    def __init__(
+        self,
+        export_number: int,
+        errors: list[dict[str, object]],
+        warnings: list[dict[str, object]],
+        notices: list[dict[str, object]],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__("ui/dialogs/export_diagnostics_geometry", parent)
+        self.setWindowTitle(f"Export #{export_number:03d} diagnostics")
+        self.setMinimumSize(480, 360)
+        layout = QVBoxLayout(self)
+        title = QLabel(f"EXPORT #{export_number:03d}")
+        title.setObjectName("title")
+        layout.addWidget(title)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        for heading, entries in (("Errors", errors), ("Warnings", warnings), ("Notices", notices)):
+            if not entries:
+                continue
+            section = QLabel(f"{heading.upper()} ({len(entries)})")
+            section.setObjectName("eyebrow")
+            body_layout.addWidget(section)
+            for entry in entries:
+                body_layout.addWidget(self._entry_row(entry))
+        if not (errors or warnings or notices):
+            empty = QLabel("No warnings, errors, or notices for this export.")
+            empty.setObjectName("muted")
+            body_layout.addWidget(empty)
+        body_layout.addStretch()
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+
+        actions = QHBoxLayout()
+        open_report = QPushButton("Open Full Report")
+        open_report.setObjectName("primary")
+        open_report.clicked.connect(self.openReportRequested.emit)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        actions.addWidget(open_report)
+        actions.addStretch()
+        actions.addWidget(close)
+        layout.addLayout(actions)
+        self.restore_saved_geometry(QSize(560, 480))
+
+    @staticmethod
+    def _entry_row(entry: dict[str, object]) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("card")
+        row = QVBoxLayout(frame)
+        row.setContentsMargins(12, 10, 12, 10)
+        row.setSpacing(2)
+        for key in ("stage", "resource", "endpoint", "http_status", "error_code", "message"):
+            value = entry.get(key)
+            if value in (None, ""):
+                continue
+            field = QLabel(f"{key.replace('_', ' ').title()}: {value}")
+            field.setWordWrap(True)
+            field.setObjectName("bodyText" if key == "message" else "muted")
+            row.addWidget(field)
+        return frame

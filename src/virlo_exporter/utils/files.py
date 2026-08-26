@@ -34,3 +34,19 @@ def reveal_in_explorer(path: Path) -> None:
     import subprocess
 
     subprocess.run(["explorer", f"/select,{path.resolve()}"], check=False)
+
+
+def delete_directory(path: Path) -> None:
+    """Recursively and permanently delete a directory. A no-op if it's
+    already gone (e.g. the user deleted it manually, or it never existed)."""
+    import shutil
+
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def directory_size(path: Path) -> int:
+    """Total size in bytes of every file under `path`, or 0 if it's missing."""
+    if not path.exists():
+        return 0
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
