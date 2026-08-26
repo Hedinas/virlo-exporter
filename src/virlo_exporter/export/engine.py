@@ -92,10 +92,14 @@ class ExportEngine:
         *,
         page: int | None = None,
     ) -> None:
-        if self.cancel_event.is_set():
-            raise ExportCancelled()
+        # Record progress *before* checking for cancellation, so if this is
+        # the page that gets interrupted, tracker.current still reflects it
+        # (page/current/total) for the "Interrupted at page N" summary this
+        # raise leads to -- not whatever page happened to finish last.
         if self._tracker:
             self._tracker.update(current=current, total=total, message=message, page=page)
+        if self.cancel_event.is_set():
+            raise ExportCancelled()
 
     @staticmethod
     def _write_json(path: Path, value: Any) -> None:
@@ -270,10 +274,11 @@ class ExportEngine:
                         "billing_class": BillingClass.FREE_READ,
                         "errors": [str(exc)],
                     }
+                    detail = f"HTTP {exc.status_code}: {exc}" if exc.status_code else str(exc)
                     if resource == "videos":
                         manifest["errors"].append(f"videos: {exc}")
                         fatal_diagnostics.append(diagnostic_entry)
-                        tracker.finish("failed", summary="Required resource failed", detail=str(exc))
+                        tracker.finish("failed", summary="Required resource failed", detail=detail)
                         log_lines.append(f"FATAL {resource}: {type(exc).__name__}: {exc}")
                         raise ExportFatalError(
                             f"Required videos stage failed: {exc}", status_code=exc.status_code
@@ -281,7 +286,7 @@ class ExportEngine:
                     manifest["warnings"].append(f"{resource}: {exc}")
                     diagnostics.append(diagnostic_entry)
                     log_lines.append(f"WARN {resource}: {type(exc).__name__}: {exc}")
-                    tracker.finish("warning", summary="Optional resource unavailable", detail=str(exc))
+                    tracker.finish("warning", summary="Optional resource unavailable", detail=detail)
 
             tracker.start("selection", "Selecting high-signal and baseline videos")
             videos = resources.get("videos", [])
@@ -394,6 +399,22 @@ class ExportEngine:
                 export_id, export_number, research_number, statistics
             )
         except ExportCancelled:
+            interrupted_stage = None
+            interrupted_page = None
+            if tracker.current and tracker.current.get("status") == "running":
+                interrupted_stage = tracker.current.get("stage")
+                interrupted_page = tracker.current.get("page")
+                page_note = f" at page {interrupted_page}" if interrupted_page else ""
+                # A real terminal event for the interrupted stage -- without
+                # this it would stay "running" forever in the persisted
+                # export_stages row, so reopening this export later via
+                # "View Process" would show it stuck running rather than
+                # interrupted.
+                tracker.finish(
+                    "cancelled",
+                    summary=f"Interrupted by user{page_note}",
+                    detail=f"stage={interrupted_stage} page={interrupted_page}",
+                )
             if export_dir:
                 (export_dir / "EXPORT_CANCELLED").write_text(
                     "Export cancelled by user.\n", encoding="utf-8"
@@ -405,7 +426,14 @@ class ExportEngine:
                 completed_at=datetime.now(UTC).isoformat(),
                 validation="incomplete",
             )
-            save_report("cancelled")
+            save_report(
+                "cancelled",
+                extra_summary={
+                    "reason": "user_cancelled",
+                    "interrupted_stage": interrupted_stage,
+                    "interrupted_page": interrupted_page,
+                },
+            )
             raise
         except Exception as exc:
             if tracker.current and tracker.current.get("status") == "running":

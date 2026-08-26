@@ -28,17 +28,19 @@ STAGE_ICONS = {
     "warning": "⚠",
     "failed": "✕",
     "skipped": "⊘",
-    "cancelled": "⊘",
+    "cancelled": "⏸",
 }
 
 # (fill, border) colors per visual state, used by StageBlock's custom painting.
+# "cancelled" (user-facing: Interrupted) gets its own amber/yellow -- distinct
+# from warning's orange -- never reusing another state's color.
 BLOCK_PALETTE = {
     "running": ("#12151A", "#3B4655"),
     "complete": ("#12241A", "#2FA66C"),
     "warning": ("#2A2210", "#D69632"),
     "failed": ("#2A1416", "#EF4444"),
     "skipped": ("#15181D", "#3B4655"),
-    "cancelled": ("#15181D", "#3B4655"),
+    "cancelled": ("#2A2712", "#D6C632"),
 }
 
 # Status-box text/state per terminal status -- the single place a stage's
@@ -48,14 +50,19 @@ STATUS_BOX_TEXT = {
     "warning": "!",
     "failed": "×",
     "skipped": "⊘",
-    "cancelled": "⊘",
+    "cancelled": "⏸",
 }
 STATUS_BOX_STATE = {
     "complete": "complete",
     "warning": "warning",
     "failed": "failed",
     "skipped": "neutral",
-    "cancelled": "neutral",
+    "cancelled": "cancelled",
+}
+STATUS_BOX_TOOLTIP = {
+    "complete": "Complete",
+    "skipped": "Skipped",
+    "cancelled": "Interrupted by user",
 }
 
 SPINNER_FRAMES = ["◜", "◠", "◝", "◞", "◡", "◟"]
@@ -105,6 +112,28 @@ def stroke_indeterminate_segment(
         stroke_partial_path(painter, path, 0.0, end - 1.0)
 
 
+class ClickableStatusBox(QLabel):
+    """The corner status box becomes clickable only for states that have
+    something worth explaining (warning/interrupted/failed) -- set via
+    set_clickable() rather than always-on, so it doesn't invite clicks on a
+    plain running percent or a clean completion."""
+
+    clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("", parent)
+        self._clickable = False
+
+    def set_clickable(self, clickable: bool) -> None:
+        self._clickable = clickable
+        self.setCursor(Qt.CursorShape.PointingHandCursor if clickable else Qt.CursorShape.ArrowCursor)
+
+    def mousePressEvent(self, event: Any) -> None:
+        if self._clickable and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class StageBlock(QFrame):
     """A single compact stage box in the export snake. Paints its own
     perimeter progress border rather than using a stylesheet border, since
@@ -116,11 +145,15 @@ class StageBlock(QFrame):
     HEIGHT = 104
     STATUS_BOX_SIZE = 26
     STATUS_BOX_MARGIN = 8
+    CLICKABLE_STATES = {"warning", "cancelled", "failed"}
+
+    diagnosticsRequested = Signal(str)
 
     def __init__(self, stage: str, label: str, *, page_range: tuple[int, int] | None = None) -> None:
         super().__init__()
         self.stage = stage
         self.page_range = page_range
+        self._last_event: dict[str, Any] = {}
         self.setFixedSize(self.WIDTH, self.HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._status = "running"
@@ -154,10 +187,11 @@ class StageBlock(QFrame):
         self.detail_label.setWordWrap(True)
         layout.addWidget(self.detail_label)
 
-        self.status_box = QLabel("", self)
+        self.status_box = ClickableStatusBox(self)
         self.status_box.setObjectName("stageStatusBox")
         self.status_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_box.setProperty("state", "running")
+        self.status_box.clicked.connect(lambda: self.diagnosticsRequested.emit(self.stage))
         self.status_box.setGeometry(
             self.WIDTH - self.STATUS_BOX_MARGIN - self.STATUS_BOX_SIZE,
             self.HEIGHT - self.STATUS_BOX_MARGIN - self.STATUS_BOX_SIZE,
@@ -200,6 +234,7 @@ class StageBlock(QFrame):
     def apply(self, event: dict[str, Any]) -> None:
         status = str(event.get("status", "running"))
         self._status = status
+        self._last_event = dict(event)
         if label := event.get("label"):
             self.title_label.setText(str(label).upper())
 
@@ -253,6 +288,22 @@ class StageBlock(QFrame):
         self._update_status_box()
         self.update()
 
+    def _status_box_tooltip(self) -> str:
+        if self._status == "running":
+            return "Running"
+        if self._status in ("warning", "failed"):
+            detail = str(self._last_event.get("detail") or "")
+            if detail.startswith("HTTP "):
+                base = detail.split(":", 1)[0]  # "HTTP 429"
+            elif self._status == "failed":
+                base = "Export failed"
+            else:
+                base = str(self._last_event.get("summary") or "Warning")
+            return f"{base} · Click for details"
+        if self._status == "cancelled":
+            return "Interrupted by user · Click for details"
+        return STATUS_BOX_TOOLTIP.get(self._status, self._status.replace("_", " ").title())
+
     def _update_status_box(self) -> None:
         if self._status == "running":
             state = "running"
@@ -262,6 +313,8 @@ class StageBlock(QFrame):
             text = STATUS_BOX_TEXT.get(self._status, STAGE_ICONS.get(self._status, ""))
         self.status_box.setText(text)
         self.status_box.setProperty("state", state)
+        self.status_box.setToolTip(self._status_box_tooltip())
+        self.status_box.set_clickable(self._status in self.CLICKABLE_STATES)
         self.status_box.style().unpolish(self.status_box)
         self.status_box.style().polish(self.status_box)
 
@@ -485,6 +538,7 @@ class ExportTimelineWidget(QWidget):
     appear one at a time as the export actually reaches them."""
 
     cancelRequested = Signal()
+    diagnosticsRequested = Signal(dict)
 
     def __init__(self, *, live: bool, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -596,6 +650,32 @@ class ExportTimelineWidget(QWidget):
         if hasattr(self, "cancel_button"):
             self.cancel_button.setVisible(state == "running")
 
+    def mark_cancelling(self) -> None:
+        """Called synchronously the instant Cancel is clicked -- the actual
+        worker thread may take a moment longer to notice cancel_event and
+        unwind, but the user must never wait for that to see a reaction.
+        Disables the button (a second click is now impossible), stops
+        whichever stage is currently running, and freezes it into the
+        Interrupted state immediately."""
+        if hasattr(self, "cancel_button"):
+            self.cancel_button.setEnabled(False)
+        for block in self._blocks.values():
+            if block._status == "running":  # noqa: SLF001
+                block.apply(
+                    {
+                        "stage": block.stage,
+                        "label": block.title_label.text(),
+                        "status": "cancelled",
+                        "summary": "Interrupted by user",
+                    }
+                )
+        self.set_overall_status("Interrupted", "cancelled")
+
+    def _on_stage_diagnostics_requested(self, stage: str) -> None:
+        block = self._blocks.get(stage)
+        if block is not None:
+            self.diagnosticsRequested.emit(dict(block._last_event))  # noqa: SLF001
+
     def stage_order(self) -> list[str]:
         """Stages/chunks in the order their blocks appeared -- used by
         tests. A chunked stage contributes one entry per chunk key
@@ -673,6 +753,7 @@ class ExportTimelineWidget(QWidget):
         block = self._blocks.get(key)
         if block is None:
             block = StageBlock(key, display_label, page_range=page_range)
+            block.diagnosticsRequested.connect(self._on_stage_diagnostics_requested)
             self._blocks[key] = block
             self._order.append(key)
             self._snake_layout.addWidget(block)

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
+
+from PySide6.QtWidgets import QToolButton
 
 from virlo_exporter.config import AppSettings, SettingsStore
 from virlo_exporter.export import report as report_module
@@ -19,7 +22,7 @@ class NoKeyStore:
         pass
 
 
-def _make_window_with_export(tmp_path, qapp):
+def _make_window_with_export(tmp_path, qapp, *, status: str = "complete"):
     db = Database(tmp_path / "state.db")
     db.cache_agent(
         {
@@ -38,10 +41,10 @@ def _make_window_with_export(tmp_path, qapp):
         "agent-1", "run-1", 1, str(export_dir), "2026-08-25T10:00:00Z"
     )
     db.update_export(
-        export_id, path=str(export_dir), status="complete", completed_at="2026-08-25T10:05:00Z", validation="valid"
+        export_id, path=str(export_dir), status=status, completed_at="2026-08-25T10:05:00Z", validation="valid"
     )
     report = report_module.build_report(
-        export_row={"export_number": export_number, "research_number": 1, "status": "complete"},
+        export_row={"export_number": export_number, "research_number": 1, "status": status},
         stages=[],
         agent_name="Raxeko",
         summary={"videos": 100, "warnings": 0, "paid_api_calls": 0},
@@ -163,3 +166,59 @@ def test_completion_overlay_shows_real_warning_count_not_raw_string_count(tmp_pa
         label.text() for label in overlays[0].findChildren(QLabel) if label.objectName() == "completionTitle"
     )
     assert title_text == "✓ EXPORT COMPLETE"  # not warnings/failed framing
+
+
+def _report_button(card) -> QToolButton:
+    return next(
+        button
+        for button in card.findChildren(QToolButton)
+        if button.toolTip() in ("Open report", "No diagnostic report issues for this export.")
+    )
+
+
+def test_report_action_disabled_for_a_fully_clean_export(tmp_path, qapp) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(
+        tmp_path, qapp, status="complete"
+    )
+    card = window._export_card(agent, run, export_record)
+    button = _report_button(card)
+    assert not button.isEnabled()
+    assert button.toolTip() == "No diagnostic report issues for this export."
+
+
+def test_report_action_enabled_for_cancelled_warning_and_failed_exports(tmp_path, qapp) -> None:
+    for status in ("cancelled", "complete_with_warnings", "failed"):
+        window, agent, run, export_record, export_dir = _make_window_with_export(
+            tmp_path / status, qapp, status=status
+        )
+        card = window._export_card(agent, run, export_record)
+        button = _report_button(card)
+        assert button.isEnabled(), f"Report must be enabled for status={status}"
+        assert button.toolTip() == "Open report"
+
+
+def test_cancel_export_reacts_instantly_and_preserves_route(tmp_path, qapp) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(
+        tmp_path, qapp, status="complete"
+    )
+    window.export_cancel = Event()
+    process_id = f"export:{agent.id}:{run.id}"
+    window._live_export_events[process_id] = []
+    window._show_live_export_view(process_id, agent, run)
+    timeline = window._active_export_timeline
+    timeline.apply_event({"stage": "videos", "label": "Fetching videos", "status": "running"})
+    route_before = window._current_page
+
+    window._cancel_export(process_id, timeline)
+
+    # All synchronous -- none of this waits for a background worker.
+    assert window.export_cancel.is_set()
+    assert timeline.stage_status("videos") == "cancelled"
+    assert not timeline.cancel_button.isEnabled()
+    assert process_id in window._cancelling_process_ids
+    assert window._current_page == route_before  # cancel never navigates away
+
+    # The worker's eventual confirmation clears the transient cancelling flag.
+    window._export_failed(process_id, Exception(), "ExportCancelled")
+    assert process_id not in window._cancelling_process_ids
+    assert window._current_page == route_before

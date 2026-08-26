@@ -68,6 +68,7 @@ from .dialogs import (
     ExportDiagnosticsDialog,
     PaidConfirmationDialog,
     SettingsDialog,
+    StageDiagnosticsDialog,
     show_error,
 )
 from .export_view import (
@@ -158,24 +159,34 @@ def mini_card(label_text: str, value_text: str, state: str = "neutral") -> QFram
     return frame
 
 
-def icon_action_button(icon_text: str, tooltip: str, callback: Any) -> QToolButton:
+def icon_action_button(
+    icon_text: str, tooltip: str, callback: Any, *, enabled: bool = True
+) -> QToolButton:
     button = QToolButton()
     button.setObjectName("iconAction")
     button.setText(icon_text)
     button.setToolTip(tooltip)
-    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setCursor(
+        Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor
+    )
+    button.setEnabled(enabled)
     button.clicked.connect(callback)
     return button
 
 
 def icon_toolbar(actions: Any) -> QHBoxLayout:
-    """A row of small centered icon buttons (icon_text, tooltip, callback)
-    replacing the old three-dot overflow menu -- every action is visible
-    and reachable in one click, with a tooltip standing in for a label."""
+    """A row of small centered icon buttons replacing the old three-dot
+    overflow menu -- every action is visible and reachable in one click,
+    with a tooltip standing in for a label. Each entry is either a plain
+    (icon_text, tooltip, callback) or a 4-tuple ending in enabled=False to
+    show the action disabled with an explanatory tooltip rather than
+    hiding it (e.g. Report with nothing to report)."""
     row = QHBoxLayout()
     row.setSpacing(4)
-    for icon_text, tooltip, callback in actions:
-        row.addWidget(icon_action_button(icon_text, tooltip, callback))
+    for entry in actions:
+        icon_text, tooltip, callback, *rest = entry
+        enabled = rest[0] if rest else True
+        row.addWidget(icon_action_button(icon_text, tooltip, callback, enabled=enabled))
     return row
 
 
@@ -330,7 +341,17 @@ RUN_STATUS_STATE = {
     "pending": "running",
     "processing": "running",
     "failed": "failed",
+    "cancelled": "cancelled",
 }
+
+# Internal status strings stay as-is (DB values, RUN_STATUS_STATE keys) --
+# only user-facing text is renamed. "cancelled" reads as "Interrupted" to
+# the user everywhere it's displayed as a status word.
+STATUS_DISPLAY_TEXT = {"cancelled": "Interrupted"}
+
+
+def display_status_text(status: str) -> str:
+    return STATUS_DISPLAY_TEXT.get(status.casefold(), status.replace("_", " ").title())
 
 
 def metric_card(label_text: str, value_text: str) -> QFrame:
@@ -618,6 +639,7 @@ class MainWindow(QMainWindow):
         self._current_page: tuple[Any, ...] = ("empty",)
         self.active_workers: set[Worker] = set()
         self.export_cancel: Event | None = None
+        self._cancelling_process_ids: set[str] = set()
         # Event log per running/finished export process_id, kept independent
         # of whatever page is currently on screen so navigating away and
         # back (or a background refresh) never loses live progress.
@@ -1076,11 +1098,15 @@ class MainWindow(QMainWindow):
             # tag -- `key` is merged in last so it always wins that collision.
             item.setData(Qt.ItemDataRole.UserRole, {**process, **key})
             item.setSizeHint(QSize(220, 62))
-            payload = process.get("payload") if isinstance(process.get("payload"), dict) else {}
-            secondary = str(payload.get("stage") or process["status"]).replace("_", " ").title()
-            if isinstance(payload.get("percent"), (int, float)):
-                secondary = f"{secondary} · {int(payload['percent'])}%"
-            row = ProcessRow(process["label"], secondary, active=True)
+            is_cancelling = process["process_id"] in self._cancelling_process_ids
+            if is_cancelling:
+                secondary = "Interrupting…"
+            else:
+                payload = process.get("payload") if isinstance(process.get("payload"), dict) else {}
+                secondary = str(payload.get("stage") or process["status"]).replace("_", " ").title()
+                if isinstance(payload.get("percent"), (int, float)):
+                    secondary = f"{secondary} · {int(payload['percent'])}%"
+            row = ProcessRow(process["label"], secondary, active=not is_cancelling)
             self.process_list.addItem(item)
             self.process_list.setItemWidget(item, row)
             if self._process_keys_match(key, current_key):
@@ -1603,8 +1629,9 @@ class MainWindow(QMainWindow):
         title.setObjectName("cardTitle")
         top.addWidget(title)
         top.addStretch()
-        badge = ClickableStatusBadge(status.replace("_", " "), state)
-        if status in {"failed", "complete_with_warnings"} and not files_missing:
+        badge = ClickableStatusBadge(display_status_text(status), state)
+        has_diagnostic_reason = status in {"failed", "cancelled", "complete_with_warnings"}
+        if has_diagnostic_reason and not files_missing:
             badge.setToolTip("Click for diagnostic details")
             badge.clicked.connect(
                 lambda _=False, record=export_record: self.show_export_diagnostics(agent, run, record)
@@ -1677,10 +1704,13 @@ class MainWindow(QMainWindow):
                 ),
                 (
                     "📄",
-                    "Open report",
+                    "Open report"
+                    if has_diagnostic_reason
+                    else "No diagnostic report issues for this export.",
                     lambda _=False, record=export_record: self.open_export_report(
                         agent, run, record
                     ),
+                    has_diagnostic_reason,
                 ),
             )
         )
@@ -2218,12 +2248,34 @@ class MainWindow(QMainWindow):
         overlay.closed.connect(lambda: self.show_run(agent, run))
         overlay.show_over_parent()
 
+    def _cancel_export(self, process_id: str, timeline: ExportTimelineWidget) -> None:
+        """Runs synchronously on click -- the UI reacts instantly regardless
+        of how long the background worker takes to actually notice
+        cancel_event and unwind (network round-trip, cleanup, ...)."""
+        timeline.mark_cancelling()
+        self._cancelling_process_ids.add(process_id)
+        self._populate_processes()
+        if self.export_cancel is not None:
+            self.export_cancel.set()
+
+    def _show_stage_diagnostics(self, agent: Agent, run: Run, event: dict[str, Any]) -> None:
+        dialog = StageDiagnosticsDialog(event, self)
+        dialog.openReportRequested.connect(
+            lambda: self.open_export_report(agent, run, self._latest_export_record(agent, run))
+        )
+        dialog.exec()
+
+    def _latest_export_record(self, agent: Agent, run: Run) -> dict[str, Any]:
+        history = self.database.export_history(agent.id, run.id)
+        return history[0] if history else {}
+
     def _export_failed(
         self, process_id: str, error: Exception | str, details: str
     ) -> None:
         cancelled = "ExportCancelled" in details
         status = "cancelled" if cancelled else "failed"
         self.database.upsert_process(process_id, "export", "Export", status, {})
+        self._cancelling_process_ids.discard(process_id)
         self._live_export_events.pop(process_id, None)
         self._populate_processes()
         if not cancelled:
@@ -2231,11 +2283,13 @@ class MainWindow(QMainWindow):
         timeline = self._current_export_timeline(process_id)
         if timeline is not None:
             timeline.stop_timer()
+            # mark_cancelling() (on click) already froze this UI instantly;
+            # this just confirms the worker has actually finished unwinding.
             timeline.set_overall_status(
-                "Cancelled" if cancelled else "Failed", "neutral" if cancelled else "failed"
+                "Interrupted" if cancelled else "Failed", "cancelled" if cancelled else "failed"
             )
         if cancelled:
-            self.statusBar().showMessage("Export cancelled", 5000)
+            self.statusBar().showMessage("Export interrupted", 5000)
         else:
             self.statusBar().showMessage("Export failed — see process view for details", 8000)
 
@@ -2267,9 +2321,13 @@ class MainWindow(QMainWindow):
         timeline.set_header(
             f"EXPORT #{export_record['export_number']:03d}", f"Research #{number:03d} · {agent.name}"
         )
-        state = RUN_STATUS_STATE.get(str(export_record.get("status", "")).casefold(), "neutral")
-        timeline.set_overall_status(str(export_record.get("status", "")).replace("_", " "), state)
+        record_status = str(export_record.get("status", ""))
+        state = RUN_STATUS_STATE.get(record_status.casefold(), "neutral")
+        timeline.set_overall_status(display_status_text(record_status), state)
         timeline.load_history(self.database.export_stages(export_record["id"]))
+        timeline.diagnosticsRequested.connect(
+            lambda event: self._show_stage_diagnostics(agent, run, event)
+        )
         page_layout.addWidget(timeline)
         actions = QHBoxLayout()
         open_button = QPushButton("Open Folder")
@@ -2300,8 +2358,10 @@ class MainWindow(QMainWindow):
         timeline.set_header(f"EXPORT · RESEARCH #{number:03d}", f"{subtitle} · {agent.name}")
         for event in self._live_export_events.get(process_id, []):
             timeline.apply_event(event)
-        if self.export_cancel is not None:
-            timeline.cancelRequested.connect(self.export_cancel.set)
+        timeline.cancelRequested.connect(lambda: self._cancel_export(process_id, timeline))
+        timeline.diagnosticsRequested.connect(
+            lambda event: self._show_stage_diagnostics(agent, run, event)
+        )
         page_layout.addWidget(timeline)
         self._show_page(page)
         self._active_export_timeline = timeline

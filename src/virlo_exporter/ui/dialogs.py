@@ -296,3 +296,79 @@ class ExportDiagnosticsDialog(PersistentDialog):
             field.setObjectName("bodyText" if key == "message" else "muted")
             row.addWidget(field)
         return frame
+
+
+class StageDiagnosticsDialog(PersistentDialog):
+    """Compact per-stage diagnostics, opened by clicking a warning/
+    interrupted/failed status box in the live or historical snake view --
+    a human-readable reason plus a safe technical-details block the user
+    can copy and hand to an AI assistant without leaking credentials."""
+
+    openReportRequested = Signal()
+
+    HEADINGS = {"warning": "WARNING", "cancelled": "INTERRUPTED", "failed": "FAILED"}
+
+    def __init__(self, event: dict[str, object], parent: QWidget | None = None) -> None:
+        super().__init__("ui/dialogs/stage_diagnostics_geometry", parent)
+        from virlo_exporter.export.report import redact_secrets
+
+        status = str(event.get("status", ""))
+        self.setWindowTitle(self.HEADINGS.get(status, status.upper() or "Diagnostics"))
+        self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+
+        title = QLabel(self.HEADINGS.get(status, status.upper() or "DIAGNOSTICS"))
+        title.setObjectName("title")
+        layout.addWidget(title)
+
+        stage = str(event.get("stage") or "")
+        label = str(event.get("label") or stage.split(":", 1)[0].replace("_", " ").title())
+        layout.addWidget(QLabel(f"Stage: {label}"))
+        page = event.get("page")
+        if isinstance(page, int):
+            layout.addWidget(QLabel(f"Page: {page}"))
+
+        reason_heading = QLabel("REASON")
+        reason_heading.setObjectName("eyebrow")
+        layout.addWidget(reason_heading)
+        reason_text = redact_secrets(str(event.get("summary") or "No summary available."))
+        reason_label = QLabel(reason_text)
+        reason_label.setWordWrap(True)
+        reason_label.setObjectName("bodyText")
+        layout.addWidget(reason_label)
+
+        detail = event.get("detail")
+        technical_lines = [f"status: {status}", f"stage: {stage}"]
+        if isinstance(page, int):
+            technical_lines.append(f"page: {page}")
+        for key in ("current", "total"):
+            if event.get(key) is not None:
+                technical_lines.append(f"{key}: {event[key]}")
+        if detail:
+            technical_lines.append(f"detail: {redact_secrets(str(detail))}")
+        self._technical_text = redact_secrets("\n".join(technical_lines))
+
+        technical_heading = QLabel("TECHNICAL DETAILS")
+        technical_heading.setObjectName("eyebrow")
+        layout.addWidget(technical_heading)
+        technical_view = QTextEdit()
+        technical_view.setReadOnly(True)
+        technical_view.setPlainText(self._technical_text)
+        technical_view.setMinimumHeight(110)
+        layout.addWidget(technical_view)
+
+        actions = QHBoxLayout()
+        copy_button = QPushButton("Copy Details")
+        copy_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(self._technical_text)
+        )
+        report_button = QPushButton("Open Report")
+        report_button.clicked.connect(self.openReportRequested.emit)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        actions.addWidget(copy_button)
+        actions.addWidget(report_button)
+        actions.addStretch()
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+        self.restore_saved_geometry(QSize(480, 380))

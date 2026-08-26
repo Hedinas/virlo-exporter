@@ -214,3 +214,22 @@ def test_background_refresh_does_not_force_navigation_away_from_research(tmp_pat
     assert window._current_page == ("run", "agent-1", run.id)
     assert window.research_list.currentItem() is not None
     assert window.agent_list.currentItem() is None
+
+
+def test_cancelling_process_shows_interrupting_and_stops_animating(tmp_path, qapp) -> None:
+    from PySide6.QtWidgets import QLabel
+
+    window = _make_window(tmp_path, qapp)
+    process_id = "export:agent-1:run-1"
+    window.database.upsert_process(process_id, "export", "Export Research #001", "running", {"stage": "videos"})
+    window._populate_processes()
+    row = window.process_list.itemWidget(window.process_list.item(0))
+    assert row._active  # noqa: SLF001 - normally running, animation on
+
+    window._cancelling_process_ids.add(process_id)
+    window._populate_processes()
+
+    row = window.process_list.itemWidget(window.process_list.item(0))
+    assert row._timer is None  # noqa: SLF001 - animation stopped
+    labels = [label.text() for label in row.findChildren(QLabel)]
+    assert any("Interrupting" in text for text in labels)

@@ -318,3 +318,86 @@ def test_snake_layout_alternates_row_direction(qapp) -> None:
     assert row0 == sorted(row0)  # left to right
     assert row1 == sorted(row1, reverse=True)  # right to left
     assert blocks[0].geometry().y() < blocks[3].geometry().y()
+
+
+def test_mark_cancelling_is_instant_and_does_not_wait_for_the_worker(qapp) -> None:
+    timeline = ExportTimelineWidget(live=True)
+    timeline.apply_event(
+        {"stage": "videos", "label": "Fetching videos", "status": "running", "current": 100, "total": 500}
+    )
+    assert timeline.cancel_button.isEnabled()
+
+    timeline.mark_cancelling()
+
+    # All of this happens synchronously, in the same call -- none of it
+    # waits for the background worker to actually notice cancel_event.
+    assert not timeline.cancel_button.isEnabled()
+    assert timeline.stage_status("videos") == "cancelled"
+    assert timeline.status_badge_label.text() == "INTERRUPTED"
+    assert timeline.status_badge_label.property("state") == "cancelled"
+    block = timeline._blocks["videos"]  # noqa: SLF001
+    assert not block._timer.isActive()  # noqa: SLF001 - indeterminate/spinner animation stopped
+    assert block.status_box.text() != ""  # interrupted symbol shown, not blank
+
+
+def test_mark_cancelling_ignores_a_second_click(qapp) -> None:
+    # The button is disabled by the first call, so Qt would never deliver a
+    # second click -- but the method itself must also be safe to call twice.
+    timeline = ExportTimelineWidget(live=True)
+    timeline.apply_event({"stage": "videos", "label": "Fetching videos", "status": "running"})
+    timeline.mark_cancelling()
+    timeline.mark_cancelling()
+    assert timeline.stage_status("videos") == "cancelled"
+
+
+def test_completed_stage_status_box_is_not_clickable(qapp) -> None:
+    timeline = ExportTimelineWidget(live=True)
+    timeline.apply_event({"stage": "prepare", "label": "Preparing", "status": "running"})
+    timeline.apply_event({"stage": "prepare", "label": "Preparing", "status": "complete"})
+    block = timeline._blocks["prepare"]  # noqa: SLF001
+    assert block.status_box._clickable is False  # noqa: SLF001
+
+
+def test_warning_interrupted_and_failed_status_boxes_are_clickable_and_emit_diagnostics(qapp) -> None:
+    timeline = ExportTimelineWidget(live=True)
+    received: list[dict] = []
+    timeline.diagnosticsRequested.connect(received.append)
+
+    timeline.apply_event({"stage": "sounds", "label": "Fetching sounds", "status": "running"})
+    timeline.apply_event(
+        {"stage": "sounds", "label": "Fetching sounds", "status": "warning", "summary": "unavailable"}
+    )
+    sounds_block = timeline._blocks["sounds"]  # noqa: SLF001
+    assert sounds_block.status_box._clickable is True  # noqa: SLF001
+    sounds_block.status_box.clicked.emit()
+    assert received[-1]["stage"] == "sounds"
+    assert received[-1]["summary"] == "unavailable"
+
+    timeline.apply_event({"stage": "videos", "label": "Fetching videos", "status": "running"})
+    timeline.mark_cancelling()
+    videos_block = timeline._blocks["videos"]  # noqa: SLF001
+    assert videos_block.status_box._clickable is True  # noqa: SLF001
+    videos_block.status_box.clicked.emit()
+    assert received[-1]["stage"] == "videos"
+    assert received[-1]["status"] == "cancelled"
+
+    timeline.apply_event({"stage": "outliers", "label": "Fetching outliers", "status": "running"})
+    timeline.apply_event({"stage": "outliers", "label": "Fetching outliers", "status": "failed", "summary": "boom"})
+    outliers_block = timeline._blocks["outliers"]  # noqa: SLF001
+    assert outliers_block.status_box._clickable is True  # noqa: SLF001
+
+
+def test_failed_status_box_tooltip_surfaces_http_status(qapp) -> None:
+    timeline = ExportTimelineWidget(live=True)
+    timeline.apply_event({"stage": "sounds", "label": "Fetching sounds", "status": "running"})
+    timeline.apply_event(
+        {
+            "stage": "sounds",
+            "label": "Fetching sounds",
+            "status": "warning",
+            "summary": "Optional resource unavailable",
+            "detail": "HTTP 429: Rate limited. Retry after 30s.",
+        }
+    )
+    block = timeline._blocks["sounds"]  # noqa: SLF001
+    assert block.status_box.toolTip().startswith("HTTP 429")
