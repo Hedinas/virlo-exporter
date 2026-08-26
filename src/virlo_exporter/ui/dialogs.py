@@ -245,7 +245,7 @@ class ExportDiagnosticsDialog(PersistentDialog):
     ) -> None:
         super().__init__("ui/dialogs/export_diagnostics_geometry", parent)
         self.setWindowTitle(f"Export #{export_number:03d} diagnostics")
-        self.setMinimumSize(480, 360)
+        self.setMinimumSize(480, 300)
         layout = QVBoxLayout(self)
         title = QLabel(f"EXPORT #{export_number:03d}")
         title.setObjectName("title")
@@ -254,6 +254,8 @@ class ExportDiagnosticsDialog(PersistentDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumHeight(120)
+        scroll.setMaximumHeight(330)
         body = QWidget()
         body_layout = QVBoxLayout(body)
         for heading, entries in (("Errors", errors), ("Warnings", warnings), ("Notices", notices)):
@@ -282,7 +284,11 @@ class ExportDiagnosticsDialog(PersistentDialog):
         actions.addStretch()
         actions.addWidget(close)
         layout.addLayout(actions)
-        self.restore_saved_geometry(QSize(560, 480))
+        entry_count = len(errors) + len(warnings) + len(notices)
+        target_height = 330 + max(0, min(entry_count, 3) - 1) * 65
+        self.restore_saved_geometry(QSize(560, target_height))
+        if entry_count <= 3 and self.height() > target_height:
+            self.resize(self.width(), target_height)
 
     @staticmethod
     def _entry_row(entry: dict[str, object]) -> QFrame:

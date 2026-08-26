@@ -240,6 +240,7 @@ class KeywordEditor(QFrame):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
         self.chip_host = QWidget()
+        self.chip_host.setObjectName("flowHost")
         self.chip_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.flow = FlowLayout(self.chip_host)
         root.addWidget(self.chip_host)

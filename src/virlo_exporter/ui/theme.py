@@ -114,6 +114,9 @@ QTableCornerButton::section { background: #1C2027; border: 1px solid #2A303A; }
 
 QScrollArea { border: none; background: #0D0F12; }
 QScrollArea > QWidget > QWidget, QAbstractScrollArea::viewport { background: transparent; }
+QWidget#flowHost { background: transparent; }
+QWidget#configurationMain { background: transparent; }
+QSplitter#configurationSplitter { background: transparent; }
 QScrollBar:vertical { background: #12151A; width: 11px; margin: 0; border: none; }
 QScrollBar::handle:vertical {
     background: #3B4655; min-height: 30px; border-radius: 5px; margin: 2px;

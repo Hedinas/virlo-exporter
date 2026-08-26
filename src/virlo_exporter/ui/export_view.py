@@ -185,6 +185,7 @@ class StageBlock(QFrame):
         self.detail_label = QLabel("")
         self.detail_label.setObjectName("stageBlockDetail")
         self.detail_label.setWordWrap(True)
+        self.detail_label.setContentsMargins(0, 0, self.STATUS_BOX_SIZE + 4, 0)
         layout.addWidget(self.detail_label)
 
         self.status_box = ClickableStatusBox(self)
@@ -291,17 +292,8 @@ class StageBlock(QFrame):
     def _status_box_tooltip(self) -> str:
         if self._status == "running":
             return "Running"
-        if self._status in ("warning", "failed"):
-            detail = str(self._last_event.get("detail") or "")
-            if detail.startswith("HTTP "):
-                base = detail.split(":", 1)[0]  # "HTTP 429"
-            elif self._status == "failed":
-                base = "Export failed"
-            else:
-                base = str(self._last_event.get("summary") or "Warning")
-            return f"{base} · Click for details"
-        if self._status == "cancelled":
-            return "Interrupted by user · Click for details"
+        if self._status in self.CLICKABLE_STATES:
+            return "Diagnostics"
         return STATUS_BOX_TOOLTIP.get(self._status, self._status.replace("_", " ").title())
 
     def _update_status_box(self) -> None:

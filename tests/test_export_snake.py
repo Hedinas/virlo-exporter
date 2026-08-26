@@ -387,7 +387,7 @@ def test_warning_interrupted_and_failed_status_boxes_are_clickable_and_emit_diag
     assert outliers_block.status_box._clickable is True  # noqa: SLF001
 
 
-def test_failed_status_box_tooltip_surfaces_http_status(qapp) -> None:
+def test_failed_status_box_tooltip_is_short_action_name(qapp) -> None:
     timeline = ExportTimelineWidget(live=True)
     timeline.apply_event({"stage": "sounds", "label": "Fetching sounds", "status": "running"})
     timeline.apply_event(
@@ -400,4 +400,4 @@ def test_failed_status_box_tooltip_surfaces_http_status(qapp) -> None:
         }
     )
     block = timeline._blocks["sounds"]  # noqa: SLF001
-    assert block.status_box.toolTip().startswith("HTTP 429")
+    assert block.status_box.toolTip() == "Diagnostics"

@@ -289,6 +289,7 @@ class ExportCompletionOverlay(QWidget):
         ]
         metrics_flow = FlowLayout(spacing=10)
         metrics_host = QWidget()
+        metrics_host.setObjectName("flowHost")
         metrics_host.setLayout(metrics_flow)
         for label_text, value in metrics:
             metrics_flow.addWidget(metric_card(label_text, value))
@@ -1498,10 +1499,12 @@ class MainWindow(QMainWindow):
         layout.addLayout(title_box)
 
         overview, overview_layout = card()
+        overview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         overview_layout.addWidget(card_heading("Agent configuration"))
         config_splitter = QSplitter(Qt.Orientation.Horizontal)
         config_splitter.setObjectName("configurationSplitter")
         config_splitter.setChildrenCollapsible(False)
+        config_splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         left = QWidget()
         left.setObjectName("configurationMain")
         left_layout = QVBoxLayout(left)
@@ -1525,6 +1528,7 @@ class MainWindow(QMainWindow):
             platform_row.addWidget(pill(label_text))
         platform_row.addStretch()
         platform_host = QWidget()
+        platform_host.setObjectName("flowHost")
         platform_host.setLayout(platform_row)
         left_layout.addWidget(platform_host)
 
@@ -1544,6 +1548,7 @@ class MainWindow(QMainWindow):
         ):
             config_grid.addWidget(mini_card(label_text, value_text, state))
         config_grid_host = QWidget()
+        config_grid_host.setObjectName("flowHost")
         config_grid_host.setLayout(config_grid)
         left_layout.addWidget(config_grid_host)
 
@@ -1560,9 +1565,9 @@ class MainWindow(QMainWindow):
         for label_text, value_text in activity_fields:
             activity_grid.addWidget(mini_card(label_text, value_text))
         activity_grid_host = QWidget()
+        activity_grid_host.setObjectName("flowHost")
         activity_grid_host.setLayout(activity_grid)
         left_layout.addWidget(activity_grid_host)
-        left_layout.addStretch()
 
         actions = QHBoxLayout()
         actions.addStretch()
@@ -1579,6 +1584,7 @@ class MainWindow(QMainWindow):
 
         keywords_panel = QFrame()
         keywords_panel.setObjectName("keywordsPanel")
+        keywords_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         keyword_layout = QVBoxLayout(keywords_panel)
         keyword_layout.setContentsMargins(13, 12, 13, 12)
         keyword_header = QHBoxLayout()
@@ -1589,7 +1595,22 @@ class MainWindow(QMainWindow):
         keyword_list = QListWidget()
         keyword_list.setObjectName("keywordDetailList")
         keyword_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
-        keyword_list.addItems(agent.keywords or ["No keywords returned"])
+        keyword_list.setWordWrap(True)
+        keyword_list.setTextElideMode(Qt.TextElideMode.ElideNone)
+        keyword_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        for keyword in agent.keywords or ["No keywords returned"]:
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 48))
+            keyword_list.addItem(item)
+            keyword_text = QLabel(keyword)
+            keyword_text.setWordWrap(True)
+            keyword_text.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+            keyword_text.setStyleSheet("background: transparent;")
+            keyword_list.setItemWidget(item, keyword_text)
+        keyword_list.setMinimumHeight(180)
+        keyword_list.setMaximumHeight(340)
         keyword_layout.addWidget(keyword_list)
         config_splitter.addWidget(keywords_panel)
         config_splitter.setStretchFactor(0, 2)
@@ -1615,6 +1636,7 @@ class MainWindow(QMainWindow):
         else:
             runs_flow = FlowLayout(spacing=12)
             runs_host = QWidget()
+            runs_host.setObjectName("flowHost")
             runs_host.setLayout(runs_flow)
             for run in sorted(known_runs, key=run_timestamp, reverse=True):
                 runs_flow.addWidget(self._run_card(agent, run))
@@ -1649,6 +1671,7 @@ class MainWindow(QMainWindow):
 
         metrics_flow = FlowLayout(spacing=8)
         metrics_host = QWidget()
+        metrics_host.setObjectName("flowHost")
         metrics_host.setLayout(metrics_flow)
         for label_text, value_text in self._run_metrics(run):
             metrics_flow.addWidget(metric_card(label_text, value_text))
@@ -1873,6 +1896,7 @@ class MainWindow(QMainWindow):
         else:
             metrics_row = FlowLayout(spacing=8)
             metrics_host = QWidget()
+            metrics_host.setObjectName("flowHost")
             metrics_host.setLayout(metrics_row)
             for label_text, value_text in metrics:
                 metrics_row.addWidget(metric_card(label_text, value_text))
@@ -1976,12 +2000,15 @@ class MainWindow(QMainWindow):
 
         metrics_flow = FlowLayout(spacing=10)
         metrics_host = QWidget()
+        metrics_host.setObjectName("flowHost")
         metrics_host.setLayout(metrics_flow)
         for label_text, value_text in self._run_metrics(run):
             metrics_flow.addWidget(metric_card(label_text, value_text))
         layout.addWidget(metrics_host)
 
         platforms, platforms_layout = card()
+        platforms.setMaximumWidth(780)
+        platforms.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
         platforms_layout.addWidget(card_heading("Platforms"))
         platform_row = QHBoxLayout()
         platform_row.setSpacing(6)
@@ -1989,12 +2016,14 @@ class MainWindow(QMainWindow):
             platform_row.addWidget(pill(f"{label_text}   {count:,}" if isinstance(count, int) else label_text))
         platform_row.addStretch()
         platform_host = QWidget()
+        platform_host.setObjectName("flowHost")
         platform_host.setLayout(platform_row)
         platforms_layout.addWidget(platform_host)
         layout.addWidget(platforms)
 
         compact_row = FlowLayout(spacing=14)
         compact_host = QWidget()
+        compact_host.setObjectName("flowHost")
         compact_host.setLayout(compact_row)
 
         run_info, run_info_layout = card()
@@ -2017,6 +2046,8 @@ class MainWindow(QMainWindow):
         for field_label, field_value in run_info_fields:
             run_info_grid.addWidget(mini_card(field_label, field_value))
         run_info_grid_host = QWidget()
+        run_info_grid_host.setObjectName("flowHost")
+        run_info_grid_host.setMinimumWidth(400)
         run_info_grid_host.setLayout(run_info_grid)
         run_info_layout.addWidget(run_info_grid_host)
         compact_row.addWidget(run_info)
@@ -2053,6 +2084,8 @@ class MainWindow(QMainWindow):
         for field_label, field_value, field_state in intelligence_fields:
             intelligence_grid.addWidget(mini_card(field_label, field_value, field_state))
         intelligence_grid_host = QWidget()
+        intelligence_grid_host.setObjectName("flowHost")
+        intelligence_grid_host.setMinimumWidth(330)
         intelligence_grid_host.setLayout(intelligence_grid)
         intelligence_layout.addWidget(intelligence_grid_host)
         compact_row.addWidget(intelligence)
@@ -2061,9 +2094,10 @@ class MainWindow(QMainWindow):
         export = QPushButton("Export")
         export.setObjectName("primary")
         export.setMinimumHeight(44)
+        export.setMaximumWidth(220)
         export.setEnabled(run.status in {"completed", "partial_failure"})
         export.clicked.connect(lambda: self.start_export(agent, run))
-        layout.addWidget(export)
+        layout.addWidget(export, alignment=Qt.AlignmentFlag.AlignLeft)
         history = self.database.export_history(agent.id, run.id)
         layout.addWidget(card_heading("Exports"))
         if not history:
@@ -2071,6 +2105,7 @@ class MainWindow(QMainWindow):
         else:
             exports_flow = FlowLayout(spacing=14)
             exports_host = QWidget()
+            exports_host.setObjectName("flowHost")
             exports_host.setLayout(exports_flow)
             for item in history:
                 exports_flow.addWidget(self._export_card(agent, run, item))
