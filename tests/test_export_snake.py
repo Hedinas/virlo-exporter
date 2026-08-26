@@ -67,6 +67,42 @@ def test_real_percentage_only_shown_when_total_known(qapp) -> None:
     assert "40" in sounds_block.detail_label.text()
 
 
+def test_percent_never_moves_backward_when_total_grows(qapp) -> None:
+    # Reproduces the real "Sounds" bug: a growing/re-estimated total made
+    # current/total drop between two consecutive progress events even
+    # though current itself only ever increased.
+    timeline = ExportTimelineWidget(live=True)
+    timeline.apply_event(
+        {"stage": "sounds", "label": "Fetching sounds", "status": "running", "current": 50, "total": 100}
+    )
+    block = timeline._blocks["sounds"]  # noqa: SLF001 - white-box check
+    assert block.percent_label.text() == "50%"
+
+    timeline.apply_event(
+        {"stage": "sounds", "label": "Fetching sounds", "status": "running", "current": 60, "total": 200}
+    )
+    # Raw ratio here is 30%, lower than the 50% already shown -- the
+    # displayed value must never regress.
+    assert block.percent_label.text() == "50%"
+
+
+def test_percent_never_reaches_100_while_still_running(qapp) -> None:
+    # Reproduces the real "Hashtags/Hooks" bug: an optimistic early total
+    # let current reach (or exceed) it while the stage was still running,
+    # showing a fake "done" state before the stage actually finished.
+    timeline = ExportTimelineWidget(live=True)
+    timeline.apply_event(
+        {"stage": "hashtags", "label": "Fetching hashtags", "status": "running", "current": 100, "total": 100}
+    )
+    block = timeline._blocks["hashtags"]  # noqa: SLF001 - white-box check
+    assert block.percent_label.text() == "99%"
+
+    timeline.apply_event(
+        {"stage": "hashtags", "label": "Fetching hashtags", "status": "running", "current": 150, "total": 100}
+    )
+    assert block.percent_label.text() == "99%"
+
+
 def test_historical_view_loads_all_stages_without_animation(qapp) -> None:
     timeline = ExportTimelineWidget(live=False)
     rows = [

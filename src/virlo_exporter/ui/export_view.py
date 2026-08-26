@@ -108,7 +108,16 @@ class StageBlock(QFrame):
             total = event.get("total")
             message = event.get("message")
             if isinstance(current, int) and isinstance(total, int) and total > 0:
-                self._percent = min(100.0, current * 100 / total)
+                # `total` can be an early, unreliable estimate: some stages
+                # discover more pages as they go (total grows -- current/total
+                # would otherwise dip backward) and some estimates start too
+                # low (current reaches total before the stage is genuinely
+                # done -- a fake premature 100%). Capping below 100% while
+                # still running, and never letting the displayed value drop,
+                # keeps the bar reading as "still working" and moving forward
+                # no matter how `total` itself moves between events.
+                raw_percent = min(99.0, current * 100 / total)
+                self._percent = max(self._percent or 0.0, raw_percent)
                 self.percent_label.setText(f"{self._percent:.0f}%")
                 self._progress_text = f"{current:,} / {total:,}"
                 self._timer.stop()
