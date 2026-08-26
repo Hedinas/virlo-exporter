@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -219,3 +222,153 @@ class ErrorDialog(PersistentDialog):
 
 def show_error(parent: QWidget, title: str, message: str, technical: str = "") -> None:
     ErrorDialog(title, message, technical, parent).exec()
+
+
+class ExportDiagnosticsDialog(PersistentDialog):
+    """Dark, safe-technical-detail view of one export's warnings/errors,
+    surfaced from a click on a stage block or a failed/warning status
+    badge. The primary next step it offers is always the full report."""
+
+    openReportRequested = Signal()
+
+    def __init__(
+        self,
+        export_number: int,
+        errors: list[dict[str, object]],
+        warnings: list[dict[str, object]],
+        notices: list[dict[str, object]],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__("ui/dialogs/export_diagnostics_geometry", parent)
+        self.setWindowTitle(f"Export #{export_number:03d} diagnostics")
+        self.setMinimumSize(480, 360)
+        layout = QVBoxLayout(self)
+        title = QLabel(f"EXPORT #{export_number:03d}")
+        title.setObjectName("title")
+        layout.addWidget(title)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        for heading, entries in (("Errors", errors), ("Warnings", warnings), ("Notices", notices)):
+            if not entries:
+                continue
+            section = QLabel(f"{heading.upper()} ({len(entries)})")
+            section.setObjectName("eyebrow")
+            body_layout.addWidget(section)
+            for entry in entries:
+                body_layout.addWidget(self._entry_row(entry))
+        if not (errors or warnings or notices):
+            empty = QLabel("No warnings, errors, or notices for this export.")
+            empty.setObjectName("muted")
+            body_layout.addWidget(empty)
+        body_layout.addStretch()
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+
+        actions = QHBoxLayout()
+        open_report = QPushButton("Open Full Report")
+        open_report.setObjectName("primary")
+        open_report.clicked.connect(self.openReportRequested.emit)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        actions.addWidget(open_report)
+        actions.addStretch()
+        actions.addWidget(close)
+        layout.addLayout(actions)
+        self.restore_saved_geometry(QSize(560, 480))
+
+    @staticmethod
+    def _entry_row(entry: dict[str, object]) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("card")
+        row = QVBoxLayout(frame)
+        row.setContentsMargins(12, 10, 12, 10)
+        row.setSpacing(2)
+        for key in ("stage", "resource", "endpoint", "http_status", "error_code", "message"):
+            value = entry.get(key)
+            if value in (None, ""):
+                continue
+            field = QLabel(f"{key.replace('_', ' ').title()}: {value}")
+            field.setWordWrap(True)
+            field.setObjectName("bodyText" if key == "message" else "muted")
+            row.addWidget(field)
+        return frame
+
+
+class StageDiagnosticsDialog(PersistentDialog):
+    """Compact per-stage diagnostics, opened by clicking a warning/
+    interrupted/failed status box in the live or historical snake view --
+    a human-readable reason plus a safe technical-details block the user
+    can copy and hand to an AI assistant without leaking credentials."""
+
+    openReportRequested = Signal()
+
+    HEADINGS = {"warning": "WARNING", "cancelled": "INTERRUPTED", "failed": "FAILED"}
+
+    def __init__(self, event: dict[str, object], parent: QWidget | None = None) -> None:
+        super().__init__("ui/dialogs/stage_diagnostics_geometry", parent)
+        from virlo_exporter.export.report import redact_secrets
+
+        status = str(event.get("status", ""))
+        self.setWindowTitle(self.HEADINGS.get(status, status.upper() or "Diagnostics"))
+        self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+
+        title = QLabel(self.HEADINGS.get(status, status.upper() or "DIAGNOSTICS"))
+        title.setObjectName("title")
+        layout.addWidget(title)
+
+        stage = str(event.get("stage") or "")
+        label = str(event.get("label") or stage.split(":", 1)[0].replace("_", " ").title())
+        layout.addWidget(QLabel(f"Stage: {label}"))
+        page = event.get("page")
+        if isinstance(page, int):
+            layout.addWidget(QLabel(f"Page: {page}"))
+
+        reason_heading = QLabel("REASON")
+        reason_heading.setObjectName("eyebrow")
+        layout.addWidget(reason_heading)
+        reason_text = redact_secrets(str(event.get("summary") or "No summary available."))
+        reason_label = QLabel(reason_text)
+        reason_label.setWordWrap(True)
+        reason_label.setObjectName("bodyText")
+        layout.addWidget(reason_label)
+
+        detail = event.get("detail")
+        technical_lines = [f"status: {status}", f"stage: {stage}"]
+        if isinstance(page, int):
+            technical_lines.append(f"page: {page}")
+        for key in ("current", "total"):
+            if event.get(key) is not None:
+                technical_lines.append(f"{key}: {event[key]}")
+        if detail:
+            technical_lines.append(f"detail: {redact_secrets(str(detail))}")
+        self._technical_text = redact_secrets("\n".join(technical_lines))
+
+        technical_heading = QLabel("TECHNICAL DETAILS")
+        technical_heading.setObjectName("eyebrow")
+        layout.addWidget(technical_heading)
+        technical_view = QTextEdit()
+        technical_view.setReadOnly(True)
+        technical_view.setPlainText(self._technical_text)
+        technical_view.setMinimumHeight(110)
+        layout.addWidget(technical_view)
+
+        actions = QHBoxLayout()
+        copy_button = QPushButton("Copy Details")
+        copy_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(self._technical_text)
+        )
+        report_button = QPushButton("Open Report")
+        report_button.clicked.connect(self.openReportRequested.emit)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        actions.addWidget(copy_button)
+        actions.addWidget(report_button)
+        actions.addStretch()
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+        self.restore_saved_geometry(QSize(480, 380))

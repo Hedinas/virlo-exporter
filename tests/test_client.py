@@ -12,6 +12,40 @@ from virlo_exporter.api.errors import (
 )
 
 
+@pytest.mark.parametrize(
+    "resource,path_suffix",
+    [
+        ("videos", "videos"),
+        ("slideshows", "slideshows"),
+        ("ads", "ads"),
+        ("outliers", "creators/outliers"),
+        ("sounds", "sounds"),
+        ("hashtags", "hashtags"),
+        ("hooks", "hooks"),
+        ("benchmarks", "benchmarks"),
+    ],
+)
+def test_get_resource_never_sends_offset_param(resource: str, path_suffix: str) -> None:
+    # Regression test: the real Virlo API rejects an "offset" query parameter
+    # on these endpoints (400 "property offset should not exist") and paginates
+    # by page+limit instead. See export/engine.py root-cause investigation.
+    seen_params: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_params.append(dict(request.url.params))
+        return httpx.Response(
+            200,
+            json={"data": {resource: [], "count": 0, "limit": 100, "page": 1}},
+        )
+
+    client = VirloClient("virlo_tkn_test", transport=httpx.MockTransport(handler))
+    client.get_resource("agent-1", resource, data_intelligence_enabled=True)
+    assert seen_params
+    for params in seen_params:
+        assert "offset" not in params
+        assert params.get("page") is not None
+
+
 def test_402_is_not_retried() -> None:
     calls = 0
 

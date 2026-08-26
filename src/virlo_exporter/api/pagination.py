@@ -26,7 +26,11 @@ class Paginator:
         self.max_pages = max_pages
 
     def collect(
-        self, fetch: Callable[[dict[str, int]], dict[str, Any]], resource: str
+        self,
+        fetch: Callable[[dict[str, int]], dict[str, Any]],
+        resource: str,
+        *,
+        on_page: Callable[[int, int, int | None], None] | None = None,
     ) -> PageResult:
         all_records: list[dict[str, Any]] = []
         seen_pages: set[str] = set()
@@ -85,11 +89,16 @@ class Paginator:
                     seen_ids.add(key)
                 all_records.append(record)
 
+            if on_page:
+                total_hint = metadata.get("total") if isinstance(metadata, dict) else None
+                on_page(requests_made, len(all_records), total_hint)
+
             if shape == "D":
                 break
             if shape == "A":
                 expected_total = int(metadata.get("total", len(all_records)))
                 offset += len(records)
+                page += 1
                 if not records or offset >= expected_total or metadata.get("has_more") is False:
                     break
             elif shape == "B":

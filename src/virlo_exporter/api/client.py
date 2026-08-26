@@ -238,6 +238,7 @@ class VirloClient:
         *,
         data_intelligence_enabled: bool = False,
         max_pages: int = 10000,
+        on_page: Callable[[int, int, int | None], None] | None = None,
     ) -> PageResult:
         routes = {
             "videos": ("videos", "videos"),
@@ -266,21 +267,16 @@ class VirloClient:
                 f"Skipped {resource}: its retrieval is not documented as free for this agent."
             )
         paginator = Paginator(100, max_pages)
-        offset_resources = {"videos", "slideshows", "ads", "outliers"}
-        page_resources = {"sounds", "hashtags", "hooks"}
 
         def fetch(paging: dict[str, int]) -> dict[str, Any]:
-            if resource in offset_resources:
-                params = {"limit": paging["limit"], "offset": paging["offset"]}
-            elif resource in page_resources:
-                params = {"limit": paging["limit"], "page": paging["page"]}
-            else:
-                params = {}
+            # Every documented agent-resource endpoint paginates by page+limit.
+            # None of them accept an "offset" query parameter — some (videos,
+            # slideshows, outliers) reject it outright with a 400 validation
+            # error, and others (ads) silently ignore it and keep returning
+            # page 1, which the paginator then reports as a repeated page.
+            params = {"limit": paging["limit"], "page": paging["page"]}
             return self.request(
                 "GET", path, params=params, billing_class=BillingClass.FREE_READ
             )[0]
 
-        return paginator.collect(
-            fetch,
-            response_key,
-        )
+        return paginator.collect(fetch, response_key, on_page=on_page)

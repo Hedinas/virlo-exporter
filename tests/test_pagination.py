@@ -22,6 +22,26 @@ def test_shape_a_paginates_to_total() -> None:
     assert [call["offset"] for call in calls] == [0, 2, 4]
 
 
+def test_shape_a_advances_page_when_caller_paginates_by_page() -> None:
+    # Regression test: some shape-A endpoints (videos, slideshows, ads,
+    # outliers) are actually driven by "page", not "offset" — the response
+    # merely echoes an "offset" field for display. If the paginator never
+    # advances "page", a caller using it would refetch page 1 forever and
+    # eventually hit the repeated-page guard instead of finishing.
+    calls = []
+
+    def fetch(query: dict[str, int]) -> dict:
+        calls.append(query["page"])
+        page = query["page"]
+        start = (page - 1) * 2
+        records = [{"id": str(i)} for i in range(start, min(start + 2, 5))]
+        return {"data": {"videos": records, "total": 5, "limit": 2, "offset": start}}
+
+    result = Paginator(limit=2).collect(fetch, "videos")
+    assert [row["id"] for row in result.records] == ["0", "1", "2", "3", "4"]
+    assert calls == [1, 2, 3]
+
+
 def test_shape_b_uses_has_next_page() -> None:
     def fetch(query: dict[str, int]) -> dict:
         page = query["page"]

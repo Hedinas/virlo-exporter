@@ -62,6 +62,10 @@ class Database:
                     completed_at TEXT, summary TEXT, detail TEXT,
                     PRIMARY KEY(export_id, sequence)
                 );
+                CREATE TABLE IF NOT EXISTS research_hidden(
+                    agent_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                    hidden_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(agent_id, run_id)
+                );
                 """
             )
             db.execute(
@@ -131,7 +135,10 @@ class Database:
             rows = db.execute(
                 "SELECT r.agent_id,r.run_id,r.research_number,r.payload,r.started_at,"
                 "m.display_name FROM runs r LEFT JOIN research_metadata m "
-                "ON m.agent_id=r.agent_id AND m.run_id=r.run_id ORDER BY r.started_at DESC"
+                "ON m.agent_id=r.agent_id AND m.run_id=r.run_id "
+                "WHERE NOT EXISTS ("
+                "  SELECT 1 FROM research_hidden h WHERE h.agent_id=r.agent_id AND h.run_id=r.run_id"
+                ") ORDER BY r.started_at DESC"
             ).fetchall()
         values: list[dict[str, Any]] = []
         for row in rows:
@@ -163,6 +170,24 @@ class Database:
             ).fetchone()
         return str(row[0]) if row else None
 
+    def hide_research(self, agent_id: str, run_id: str) -> None:
+        """Local-only tombstone: hides a Run from this app's lists without
+        touching anything on Virlo's servers. There is no Virlo API endpoint
+        to delete a Run -- only local exports and app-side metadata can be
+        removed here."""
+        with self._lock, self.connect() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO research_hidden(agent_id,run_id) VALUES(?,?)",
+                (agent_id, run_id),
+            )
+
+    def is_research_hidden(self, agent_id: str, run_id: str) -> bool:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM research_hidden WHERE agent_id=? AND run_id=?", (agent_id, run_id)
+            ).fetchone()
+        return row is not None
+
     def begin_export(
         self, agent_id: str, run_id: str, research_number: int, path: str, started_at: str
     ) -> tuple[int, int]:
@@ -191,10 +216,23 @@ class Database:
     def export_history(self, agent_id: str, run_id: str) -> list[dict[str, Any]]:
         with self.connect() as db:
             rows = db.execute(
-                "SELECT * FROM exports WHERE agent_id=? AND run_id=? ORDER BY export_number DESC",
+                "SELECT * FROM exports WHERE agent_id=? AND run_id=? AND status!='deleted' "
+                "ORDER BY export_number DESC",
                 (agent_id, run_id),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def delete_export(self, export_id: int) -> None:
+        """Permanently remove an export's local records. The exports row
+        itself is kept as a tombstone (status='deleted', path cleared) so
+        export_number stays monotonic -- a deleted #006 is never reissued
+        to a later export. Only stage history is actually deleted; callers
+        are responsible for removing the export's directory from disk."""
+        with self._lock, self.connect() as db:
+            db.execute("DELETE FROM export_stages WHERE export_id=?", (export_id,))
+            db.execute(
+                "UPDATE exports SET status='deleted', path='' WHERE id=?", (export_id,)
+            )
 
     def upsert_export_stage(self, export_id: int, event: dict[str, Any]) -> None:
         with self._lock, self.connect() as db:

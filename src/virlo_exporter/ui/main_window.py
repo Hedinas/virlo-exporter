@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from threading import Event
 from typing import Any
 
-from PySide6.QtCore import QSettings, QSize, Qt, QThreadPool, QTimer
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtCore import QEvent, QRectF, QSettings, QSize, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QToolButton,
@@ -40,20 +42,45 @@ from virlo_exporter.api.errors import (
     VirloError,
 )
 from virlo_exporter.config import AppSettings, SettingsStore
+from virlo_exporter.export import report as export_report
 from virlo_exporter.export.engine import ExportEngine, ExportResult
 from virlo_exporter.models import Agent, Run
 from virlo_exporter.services.workers import Worker
 from virlo_exporter.storage.database import Database
 from virlo_exporter.storage.key_store import ApiKeyStore
-from virlo_exporter.utils.files import open_in_explorer
+from virlo_exporter.utils.files import (
+    delete_directory,
+    directory_size,
+    open_in_explorer,
+    reveal_in_explorer,
+)
 
-from .components import AgentEditorDialog, CollapsibleSection, NewResearchDialog, ensure_visible
-from .dialogs import ApiKeyDialog, PaidConfirmationDialog, SettingsDialog, show_error
-from .logic import agent_display_status, run_timestamp
+from . import icons
+from .components import (
+    AgentEditorDialog,
+    CollapsibleSection,
+    FlowLayout,
+    NewResearchDialog,
+    RenameDialog,
+    ensure_visible,
+)
+from .dialogs import (
+    ApiKeyDialog,
+    ExportDiagnosticsDialog,
+    PaidConfirmationDialog,
+    SettingsDialog,
+    StageDiagnosticsDialog,
+    show_error,
+)
+from .export_view import (
+    PROGRESS_COLOR,
+    ExportTimelineWidget,
+    format_bytes,
+    stroke_indeterminate_segment,
+)
+from .logic import agent_display_status, research_search_text, run_timestamp
 
 logger = logging.getLogger(__name__)
-
-RECENT_RESEARCH_LIMIT = 12
 
 
 def human_date(value: str | None) -> str:
@@ -82,6 +109,20 @@ def section_label(text: str) -> QLabel:
     return label
 
 
+def card_heading(text: str) -> QLabel:
+    """Level-1 heading for a card's own title (e.g. AGENT CONFIGURATION)."""
+    label = QLabel(text.upper())
+    label.setObjectName("cardHeading")
+    return label
+
+
+def micro_label(text: str) -> QLabel:
+    """Level-3 heading for mini-card/metric-card internal titles."""
+    label = QLabel(text.upper())
+    label.setObjectName("microLabel")
+    return label
+
+
 def muted(text: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName("muted")
@@ -98,54 +139,504 @@ def card() -> tuple[QFrame, QVBoxLayout]:
     return frame, layout
 
 
-class NaturalListWidget(QListWidget):
+def pill(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("platformBadge")
+    return label
+
+
+def mini_card(label_text: str, value_text: str, state: str = "neutral") -> QFrame:
+    frame = QFrame()
+    frame.setObjectName("miniCard")
+    frame.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(12, 10, 12, 10)
+    layout.setSpacing(4)
+    layout.addWidget(micro_label(label_text))
+    value = QLabel(value_text)
+    value.setObjectName("miniCardValue")
+    value.setProperty("state", state)
+    layout.addWidget(value)
+    return frame
+
+
+ICON_BUTTON_SIZE = 16
+
+
+def icon_action_button(
+    icon_name: str, tooltip: str, callback: Any, *, enabled: bool = True
+) -> QToolButton:
+    """`icon_name` is one of the unified line-icon set (icons.py) -- pencil/
+    gear/copy/folder/workflow/document/trash/warning -- never raw emoji or
+    mixed Unicode glyphs, so every action icon shares the same stroke
+    weight, size, and theme-aware color."""
+    button = QToolButton()
+    button.setObjectName("iconAction")
+    button.setIcon(icons.icon(icon_name))
+    button.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
+    button.setToolTip(tooltip)
+    button.setCursor(
+        Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor
+    )
+    button.setEnabled(enabled)
+    button.clicked.connect(callback)
+    return button
+
+
+def icon_toolbar(actions: Any) -> QHBoxLayout:
+    """A row of small centered icon buttons replacing the old three-dot
+    overflow menu -- every action is visible and reachable in one click,
+    with a tooltip standing in for a label. Each entry is either a plain
+    (icon_name, tooltip, callback) or a 4-tuple ending in enabled=False to
+    show the action disabled with an explanatory tooltip rather than
+    hiding it (e.g. Report with nothing to report)."""
+    row = QHBoxLayout()
+    row.setSpacing(4)
+    for entry in actions:
+        icon_text, tooltip, callback, *rest = entry
+        enabled = rest[0] if rest else True
+        row.addWidget(icon_action_button(icon_text, tooltip, callback, enabled=enabled))
+    return row
+
+
+def status_badge(text: str, state: str = "neutral") -> QLabel:
+    label = QLabel(text.upper())
+    label.setObjectName("statusBadge")
+    label.setProperty("state", state)
+    return label
+
+
+class ClickableStatusBadge(QLabel):
+    clicked = Signal()
+
+    def __init__(self, text: str, state: str = "neutral") -> None:
+        super().__init__(text.upper())
+        self.setObjectName("statusBadge")
+        self.setProperty("state", state)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event: Any) -> None:
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class ExportCompletionOverlay(QWidget):
+    """A single in-window centered overlay, not a separate top-level QDialog
+    -- a real QDialog carries its own OS window-chrome close button in
+    addition to any custom one drawn inside it, which is exactly what caused
+    the reported "two X buttons" bug. As a plain child QWidget this has no
+    window chrome at all: the only way to dismiss it is the one custom ×
+    button or Escape, both wired to the same close_and_notify()."""
+
+    closed = Signal()
+
+    def __init__(
+        self,
+        *,
+        state: str,
+        duration_seconds: int,
+        stats: dict[str, Any],
+        warning_count: int,
+        folder_path: Path,
+        parent: QWidget,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("completionBackdrop")
+        self.setAutoFillBackground(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        card = QFrame()
+        card.setObjectName("completionCard")
+        card.setFixedWidth(560)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+
+        top = QHBoxLayout()
+        icon = "✓" if state == "completed" else "⚠" if state == "warning" else "✕"
+        status_text = {
+            "completed": "EXPORT COMPLETE",
+            "warning": "EXPORT COMPLETE WITH WARNINGS",
+            "failed": "EXPORT FAILED",
+        }.get(state, "EXPORT COMPLETE")
+        title = QLabel(f"{icon} {status_text}")
+        title.setObjectName("completionTitle")
+        top.addWidget(title)
+        top.addStretch()
+        close_button = QToolButton()
+        close_button.setObjectName("modalCloseButton")
+        close_button.setText("×")
+        close_button.clicked.connect(self.close_and_notify)
+        top.addWidget(close_button)
+        layout.addLayout(top)
+
+        minutes, seconds = divmod(max(0, duration_seconds), 60)
+        duration_label = muted(f"{minutes}m {seconds:02d}s")
+        duration_label.setObjectName("completionDuration")
+        layout.addWidget(duration_label)
+
+        metrics = [
+            (label_text, value)
+            for label_text, value in (
+                ("RAW Data", format_bytes(stats.get("raw_bytes"))),
+                ("AI Dataset", format_bytes(stats.get("dataset_bytes"))),
+                ("Videos", f"{stats.get('videos', 0):,}"),
+                ("High Signal", f"{stats.get('high_signal', 0):,}"),
+                ("Baseline", f"{stats.get('baseline', 0):,}"),
+                ("Warnings", f"{warning_count:,}"),
+            )
+            if value not in (None, "—", "0 B", "0")
+        ]
+        metrics_flow = FlowLayout(spacing=10)
+        metrics_host = QWidget()
+        metrics_host.setLayout(metrics_flow)
+        for label_text, value in metrics:
+            metrics_flow.addWidget(metric_card(label_text, value))
+        layout.addWidget(metrics_host)
+
+        actions = QHBoxLayout()
+        open_button = QPushButton("Open Folder")
+        open_button.setObjectName("primary")
+        open_button.clicked.connect(lambda: open_in_explorer(folder_path))
+        actions.addWidget(open_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        outer.addStretch()
+        center_row = QHBoxLayout()
+        center_row.addStretch()
+        center_row.addWidget(card)
+        center_row.addStretch()
+        outer.addLayout(center_row)
+        outer.addStretch()
+
+        parent.installEventFilter(self)
+        self.setGeometry(parent.rect())
+
+    def show_over_parent(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.show()
+        self.raise_()
+        self.setFocus()
+
+    def close_and_notify(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            parent.removeEventFilter(self)
+        self.hide()
+        self.deleteLater()
+        self.closed.emit()
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.close_and_notify()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:
+        if watched is self.parentWidget() and event.type() == QEvent.Type.Resize:
+            self.setGeometry(watched.rect())
+        return super().eventFilter(watched, event)
+
+
+RUN_STATUS_STATE = {
+    "completed": "completed",
+    "partial_failure": "warning",
+    "running": "running",
+    "pending": "running",
+    "processing": "running",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
+
+# Internal status strings stay as-is (DB values, RUN_STATUS_STATE keys) --
+# only user-facing text is renamed. "cancelled" reads as "Interrupted" to
+# the user everywhere it's displayed as a status word.
+STATUS_DISPLAY_TEXT = {"cancelled": "Interrupted"}
+
+
+def display_status_text(status: str) -> str:
+    return STATUS_DISPLAY_TEXT.get(status.casefold(), status.replace("_", " ").title())
+
+
+def metric_card(label_text: str, value_text: str) -> QFrame:
+    frame = QFrame()
+    frame.setObjectName("metricCard")
+    frame.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(14, 11, 14, 11)
+    layout.setSpacing(3)
+    layout.addWidget(micro_label(label_text))
+    value = QLabel(value_text)
+    value.setObjectName("metricValue")
+    layout.addWidget(value)
+    return frame
+
+
+class RowList(QWidget):
+    """A QListWidget-like container backed by a plain QVBoxLayout of row
+    widgets instead of a QAbstractItemView. Its natural height is always
+    exactly "sum of visible rows' own sizeHint" -- there is no viewport,
+    no sizeHintForRow(), and nothing to resync after the fact. Bounding
+    the height (for the pinned Active Processes panel) is a plain
+    setMaximumHeight(), which triggers a real scrollbar via an outer
+    QScrollArea rather than a manually recomputed fixed height.
+    """
+
+    currentItemChanged = Signal(object, object)
+    itemClicked = Signal(object)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setSpacing(2)
-        self.setMinimumHeight(34)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(4)
+        self._items: list[QListWidgetItem] = []
+        self._widgets: dict[int, QWidget] = {}
+        self._current: QListWidgetItem | None = None
 
     def sync_height(self) -> None:
-        height = 2 * self.frameWidth() + 6
-        for index in range(self.count()):
-            if not self.item(index).isHidden():
-                height += max(36, self.sizeHintForRow(index)) + self.spacing()
-        self.setFixedHeight(max(34, height))
-        self.verticalScrollBar().setValue(0)
+        """No-op kept for call-site compatibility; height is always natural."""
+
+    def clear(self) -> None:
+        for widget in self._widgets.values():
+            widget.deleteLater()
+        self._widgets.clear()
+        while self._layout.count():
+            taken = self._layout.takeAt(0)
+            widget = taken.widget()
+            if widget:
+                widget.deleteLater()
+        self._items = []
+        self._current = None
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def item(self, index: int) -> QListWidgetItem | None:
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def addItem(self, item: QListWidgetItem) -> None:
+        self._items.append(item)
+        label = QLabel(item.text())
+        label.setObjectName("muted")
+        label.setWordWrap(True)
+        self._widgets[id(item)] = label
+        self._layout.addWidget(label)
+
+    def setItemWidget(self, item: QListWidgetItem, widget: QWidget) -> None:
+        previous = self._widgets.get(id(item))
+        index = self._layout.indexOf(previous) if previous is not None else -1
+        if previous is not None:
+            self._layout.removeWidget(previous)
+            previous.deleteLater()
+        self._widgets[id(item)] = widget
+        if index >= 0:
+            self._layout.insertWidget(index, widget)
+        else:
+            self._layout.addWidget(widget)
+        if hasattr(widget, "clicked"):
+            widget.clicked.connect(lambda item=item: self._row_clicked(item))
+
+    def itemWidget(self, item: QListWidgetItem) -> QWidget | None:
+        return self._widgets.get(id(item))
+
+    def set_hidden(self, item: QListWidgetItem, hidden: bool) -> None:
+        item.setHidden(hidden)
+        widget = self._widgets.get(id(item))
+        if widget is not None:
+            widget.setVisible(not hidden)
+
+    def _row_clicked(self, item: QListWidgetItem) -> None:
+        self.setCurrentItem(item)
+        self.itemClicked.emit(item)
+
+    def setCurrentItem(self, item: QListWidgetItem | None) -> None:
+        previous = self._current
+        self._current = item
+        self.currentItemChanged.emit(item, previous)
+
+    def currentItem(self) -> QListWidgetItem | None:
+        return self._current
+
+    def itemAt(self, point: Any) -> QListWidgetItem | None:
+        for item in self._items:
+            widget = self._widgets.get(id(item))
+            if widget is not None and widget.geometry().contains(point):
+                return item
+        return None
 
 
 class AgentRow(QFrame):
-    def __init__(self, agent: Agent, status: str, on_edit: Any) -> None:
+    clicked = Signal()
+
+    def __init__(
+        self, agent: Agent, status: str, on_edit: Any, on_rename: Any, on_delete: Any
+    ) -> None:
         super().__init__()
         self.setObjectName("sidebarRow")
         self.setProperty("selected", False)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 7, 5, 7)
-        layout.setSpacing(5)
+        layout.setSpacing(2)
         text = QVBoxLayout()
         text.setSpacing(1)
         name = QLabel(agent.name)
         name.setObjectName("rowTitle")
-        name.setToolTip(agent.name)
+        name.setWordWrap(True)
         secondary = QLabel(
             f"{'Recurring' if agent.is_recurring else 'One-time'} · {status}"
         )
         secondary.setObjectName("muted")
+        secondary.setWordWrap(True)
         text.addWidget(name)
         text.addWidget(secondary)
+        pencil = QToolButton()
+        pencil.setObjectName("pencilButton")
+        pencil.setIcon(icons.icon("pencil"))
+        pencil.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
+        pencil.setToolTip(f"Rename {agent.name}")
+        pencil.clicked.connect(on_rename)
         gear = QToolButton()
         gear.setObjectName("gearButton")
-        gear.setText("⚙")
+        gear.setIcon(icons.icon("gear"))
+        gear.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
         gear.setToolTip(f"Edit {agent.name}")
         gear.clicked.connect(on_edit)
+        trash = QToolButton()
+        trash.setObjectName("iconAction")
+        trash.setIcon(icons.icon("trash"))
+        trash.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
+        trash.setToolTip(f"Delete {agent.name}")
+        trash.clicked.connect(on_delete)
         layout.addLayout(text, 1)
-        layout.addWidget(gear)
+        layout.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(gear, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(trash, 0, Qt.AlignmentFlag.AlignTop)
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
         self.style().unpolish(self)
         self.style().polish(self)
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class ResearchRow(QFrame):
+    clicked = Signal()
+
+    def __init__(
+        self, title_text: str, agent_name: str, date_text: str, on_rename: Any
+    ) -> None:
+        super().__init__()
+        self.setObjectName("sidebarRow")
+        self.setProperty("selected", False)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 7, 5, 7)
+        layout.setSpacing(2)
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        title = QLabel(title_text)
+        title.setObjectName("rowTitle")
+        title.setWordWrap(True)
+        agent_label = QLabel(agent_name)
+        agent_label.setObjectName("muted")
+        agent_label.setWordWrap(True)
+        date_label = QLabel(date_text)
+        date_label.setObjectName("muted")
+        date_label.setWordWrap(True)
+        text.addWidget(title)
+        text.addWidget(agent_label)
+        text.addWidget(date_label)
+        pencil = QToolButton()
+        pencil.setObjectName("pencilButton")
+        pencil.setIcon(icons.icon("pencil"))
+        pencil.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
+        pencil.setToolTip("Rename research")
+        pencil.clicked.connect(on_rename)
+        layout.addLayout(text, 1)
+        layout.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class ProcessRow(QFrame):
+    """A pinned Active Processes row. When `active`, a small green segment
+    travels around the card's perimeter -- an indeterminate "this is still
+    alive" signal, not a real percentage. Stops and disappears the moment
+    the underlying process is no longer running (the row is simply not
+    recreated on the next sidebar rebuild)."""
+
+    clicked = Signal()
+
+    def __init__(self, title_text: str, secondary_text: str, *, active: bool = False) -> None:
+        super().__init__()
+        self.setObjectName("sidebarRow")
+        self.setProperty("selected", False)
+        self._active = active
+        self._offset = 0.0
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setSpacing(1)
+        title = QLabel(f"● {title_text}")
+        title.setObjectName("rowTitle")
+        title.setWordWrap(True)
+        secondary = QLabel(secondary_text)
+        secondary.setObjectName("muted")
+        secondary.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(secondary)
+        self._timer: QTimer | None = None
+        if active:
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self._advance)
+            self._timer.start(50)
+
+    def _advance(self) -> None:
+        self._offset = (self._offset + 0.01) % 1.0
+        self.update()
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event: Any) -> None:
+        super().paintEvent(event)
+        if not self._active:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect().adjusted(1, 1, -1, -1))
+        path = QPainterPath()
+        path.addRoundedRect(rect, 8, 8)
+        if path.length() <= 0:
+            return
+        pen = QPen(PROGRESS_COLOR, 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        stroke_indeterminate_segment(painter, path, self._offset, 0.22)
 
 
 class MainWindow(QMainWindow):
@@ -166,8 +657,16 @@ class MainWindow(QMainWindow):
         self.agents: dict[str, Agent] = {}
         self.runs: dict[str, list[Run]] = {}
         self.selected_agent_id: str | None = None
+        self._current_page: tuple[Any, ...] = ("empty",)
         self.active_workers: set[Worker] = set()
         self.export_cancel: Event | None = None
+        self._cancelling_process_ids: set[str] = set()
+        # Event log per running/finished export process_id, kept independent
+        # of whatever page is currently on screen so navigating away and
+        # back (or a background refresh) never loses live progress.
+        self._live_export_events: dict[str, list[dict[str, Any]]] = {}
+        self._active_export_timeline: ExportTimelineWidget | None = None
+        self._active_export_process_id: str | None = None
         self._runs_loading = False
         self.setWindowTitle("Virlo Exporter")
         self.setMinimumSize(940, 620)
@@ -240,7 +739,7 @@ class MainWindow(QMainWindow):
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search agents…")
         self.search.textChanged.connect(self._filter_agents)
-        self.agent_list = NaturalListWidget()
+        self.agent_list = RowList()
         self.agent_list.setObjectName("agentSidebarList")
         self.agent_list.currentItemChanged.connect(self._agent_selected)
         self.agent_list.itemClicked.connect(lambda _item: self._sync_agent_row_selection())
@@ -250,27 +749,41 @@ class MainWindow(QMainWindow):
         self.agents_section.body_layout.addWidget(self.agent_list)
         side.addWidget(self.agents_section)
 
-        self.processes_section = CollapsibleSection("ACTIVE PROCESSES")
-        self.process_list = NaturalListWidget()
-        self.process_list.itemClicked.connect(self._process_selected)
-        self.processes_section.body_layout.addWidget(self.process_list)
-        side.addWidget(self.processes_section)
-
         new_research = QPushButton("+ New Research")
         new_research.clicked.connect(self.show_new_research)
         self.research_section = CollapsibleSection("RESEARCH", new_research)
-        self.research_list = NaturalListWidget()
+        self.research_search = QLineEdit()
+        self.research_search.setPlaceholderText("Search research…")
+        self.research_search.textChanged.connect(self._filter_research)
+        self.research_list = RowList()
+        self.research_list.setObjectName("researchSidebarList")
         self.research_list.itemClicked.connect(self._research_selected)
-        self.view_all_research = QPushButton("View all")
-        self.view_all_research.setObjectName("linkButton")
-        self.view_all_research.clicked.connect(self.show_all_research)
-        self.view_all_research.hide()
+        self.research_section.body_layout.addWidget(self.research_search)
         self.research_section.body_layout.addWidget(self.research_list)
-        self.research_section.body_layout.addWidget(self.view_all_research)
         side.addWidget(self.research_section)
+
         side.addStretch()
         side_scroll.setWidget(side_body)
-        sidebar_layout.addWidget(side_scroll)
+        sidebar_layout.addWidget(side_scroll, 1)
+
+        processes_panel = QFrame()
+        processes_panel.setObjectName("processesPanel")
+        processes_layout = QVBoxLayout(processes_panel)
+        processes_layout.setContentsMargins(4, 10, 5, 4)
+        processes_layout.setSpacing(6)
+        processes_layout.addWidget(section_label("Active Processes"))
+        self.process_scroll = QScrollArea()
+        process_scroll = self.process_scroll
+        process_scroll.setObjectName("processesScroll")
+        process_scroll.setWidgetResizable(True)
+        process_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        process_scroll.setMaximumHeight(4 * 66)
+        self.process_list = RowList()
+        self.process_list.setObjectName("processSidebarList")
+        self.process_list.itemClicked.connect(self._process_selected)
+        process_scroll.setWidget(self.process_list)
+        processes_layout.addWidget(process_scroll)
+        sidebar_layout.addWidget(processes_panel, 0)
         self.main_splitter.addWidget(sidebar)
 
         self.detail = QStackedWidget()
@@ -284,9 +797,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
         self.setCentralWidget(central)
 
+        # ui/sidebar/processes_expanded is a legacy key from when Active
+        # Processes was collapsible; it is no longer read or written.
         section_settings = (
             (self.agents_section, "ui/sidebar/agents_expanded"),
-            (self.processes_section, "ui/sidebar/processes_expanded"),
             (self.research_section, "ui/sidebar/research_expanded"),
         )
         for section, key in section_settings:
@@ -460,6 +974,35 @@ class MainWindow(QMainWindow):
             self._populate_research()
             self.statusBar().showMessage("Showing cached data — connect Virlo to refresh")
 
+    def _restore_current_page(self) -> None:
+        kind = self._current_page[0]
+        if kind == "agent":
+            _, agent_id = self._current_page
+            if agent_id in self.agents:
+                self.show_agent(agent_id)
+        elif kind == "run":
+            _, agent_id, run_id = self._current_page
+            agent = self.agents.get(agent_id)
+            run = next((value for value in self.runs.get(agent_id, []) if value.id == run_id), None)
+            if agent and run:
+                self.show_run(agent, run)
+        elif kind == "process":
+            # A background refresh must not silently strand the user on a
+            # live Process view -- find the same process's (now rebuilt)
+            # sidebar row and reopen it, rather than leaving the page
+            # pointing at process_list items that no longer exist.
+            _, process_kind, agent_id, process_id = self._current_page
+            for index in range(self.process_list.count()):
+                item = self.process_list.item(index)
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if (
+                    isinstance(data, dict)
+                    and data.get("kind") == process_kind
+                    and (data.get("agent_id") == agent_id or data.get("process_id") == process_id)
+                ):
+                    self._process_selected(item)
+                    return
+
     def _populate_agents(self, records: list[dict[str, Any]]) -> None:
         current = self.selected_agent_id
         self.agents = {
@@ -468,11 +1011,18 @@ class MainWindow(QMainWindow):
         self._render_agent_list(current)
         self._populate_processes()
         self._populate_research()
-        if current and current in self.agents:
-            self.show_agent(current)
+        self._restore_current_page()
 
     def _render_agent_list(self, current: str | None = None) -> None:
         current = current or self.selected_agent_id
+        # selected_agent_id also tracks which agent owns the currently open
+        # Research/Run page (show_run sets it too, so "New Research" etc.
+        # still know the right agent) -- but the Agent row itself must only
+        # actually highlight while genuinely on the Agent Detail page, or a
+        # periodic background refresh spontaneously re-lights a stale agent
+        # row while the user is looking at Research or a Process view.
+        if self._current_page[:1] != ("agent",):
+            current = None
         self.agent_list.blockSignals(True)
         self.agent_list.clear()
         if not self.agents:
@@ -485,7 +1035,13 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, agent.id)
             item.setSizeHint(QSize(230, 64))
-            row = AgentRow(agent, status, lambda _=False, value=agent: self.edit_agent(value))
+            row = AgentRow(
+                agent,
+                status,
+                lambda _=False, value=agent: self.edit_agent(value),
+                lambda _=False, value=agent: self.quick_rename_agent(value),
+                lambda _=False, value=agent: self.delete_agent(value),
+            )
             self.agent_list.addItem(item)
             self.agent_list.setItemWidget(item, row)
             if agent.id == current:
@@ -501,7 +1057,7 @@ class MainWindow(QMainWindow):
             item = self.agent_list.item(index)
             agent_id = item.data(Qt.ItemDataRole.UserRole)
             agent = self.agents.get(str(agent_id))
-            item.setHidden(bool(agent) and query not in agent.name.casefold())
+            self.agent_list.set_hidden(item, bool(agent) and query not in agent.name.casefold())
         self.agent_list.sync_height()
 
     def _sync_agent_row_selection(self) -> None:
@@ -512,7 +1068,23 @@ class MainWindow(QMainWindow):
             if isinstance(row, AgentRow):
                 row.set_selected(item is current)
 
+    @staticmethod
+    def _process_keys_match(a: Any, b: Any) -> bool:
+        """`a`/`b` may be a bare selection key (kind/agent_id/process_id) or
+        the full merged row payload stored as item data -- compare only the
+        identity fields both shapes share, never full dict equality (a
+        merged payload always has extra keys a bare key doesn't, so `==`
+        between the two is always False and silently drops the selection
+        highlight on every list rebuild)."""
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return False
+        return a.get("kind") == b.get("kind") and (
+            a.get("agent_id") == b.get("agent_id") or a.get("process_id") == b.get("process_id")
+        )
+
     def _populate_processes(self) -> None:
+        current = self.process_list.currentItem()
+        current_key = current.data(Qt.ItemDataRole.UserRole) if current else None
         self.process_list.clear()
         for agent in self.agents.values():
             if agent.is_processing:
@@ -531,23 +1103,51 @@ class MainWindow(QMainWindow):
                 number = (
                     f" #{active_run.local_number:03d}" if active_run and active_run.local_number else ""
                 )
-                item = QListWidgetItem(f"● Research{number} · {agent.name}\n   {phase}")
-                item.setData(Qt.ItemDataRole.UserRole, {"kind": "server", "agent_id": agent.id})
+                key = {"kind": "server", "agent_id": agent.id}
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, key)
                 item.setSizeHint(QSize(220, 62))
+                row = ProcessRow(f"Research{number} · {agent.name}", phase)
                 self.process_list.addItem(item)
+                self.process_list.setItemWidget(item, row)
+                if self._process_keys_match(key, current_key):
+                    self.process_list.setCurrentItem(item)
         for process in self.database.active_processes():
-            item = QListWidgetItem(
-                f"● {process['label']}\n   {str(process['status']).replace('_', ' ').title()}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, {"kind": "local", **process})
+            key = {"kind": "local", "process_id": process["process_id"]}
+            item = QListWidgetItem()
+            # `process` has its own "kind" column (the process *type*, e.g.
+            # "export") that must not clobber the "local" selection-category
+            # tag -- `key` is merged in last so it always wins that collision.
+            item.setData(Qt.ItemDataRole.UserRole, {**process, **key})
             item.setSizeHint(QSize(220, 62))
+            is_cancelling = process["process_id"] in self._cancelling_process_ids
+            if is_cancelling:
+                secondary = "Interrupting…"
+            else:
+                payload = process.get("payload") if isinstance(process.get("payload"), dict) else {}
+                secondary = str(payload.get("stage") or process["status"]).replace("_", " ").title()
+                if isinstance(payload.get("percent"), (int, float)):
+                    secondary = f"{secondary} · {int(payload['percent'])}%"
+            row = ProcessRow(process["label"], secondary, active=not is_cancelling)
             self.process_list.addItem(item)
+            self.process_list.setItemWidget(item, row)
+            if self._process_keys_match(key, current_key):
+                self.process_list.setCurrentItem(item)
         if self.process_list.count() == 0:
             item = QListWidgetItem("No active processes")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             item.setSizeHint(QSize(220, 36))
             self.process_list.addItem(item)
         self.process_list.sync_height()
+        self._sync_process_row_selection()
+
+    def _sync_process_row_selection(self) -> None:
+        current = self.process_list.currentItem()
+        for index in range(self.process_list.count()):
+            item = self.process_list.item(index)
+            row = self.process_list.itemWidget(item)
+            if isinstance(row, ProcessRow):
+                row.set_selected(item is current)
 
     def _all_research(self) -> list[tuple[Agent, Run]]:
         values = [
@@ -559,26 +1159,110 @@ class MainWindow(QMainWindow):
         return sorted(values, key=lambda value: run_timestamp(value[1]), reverse=True)
 
     def _populate_research(self) -> None:
+        current = self.research_list.currentItem()
+        current_key = current.data(Qt.ItemDataRole.UserRole) if current else None
         self.research_list.clear()
+        # Global Research must include every known run across every Agent --
+        # not a "recent" subset -- so it always matches what's visible per-Agent.
         research = self._all_research()
-        for agent, run in research[:RECENT_RESEARCH_LIMIT]:
+        for agent, run in research:
             number = run.local_number or 0
-            item = QListWidgetItem(
-                f"Research #{number:03d} · {agent.name}\n"
-                f"{compact_date(run_timestamp(run))} · {run.status.replace('_', ' ').title()}"
+            display_name = self.database.research_display_name(agent.id, run.id)
+            title = display_name or f"Research #{number:03d}"
+            key = {"agent_id": agent.id, "run_id": run.id}
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setData(Qt.ItemDataRole.UserRole + 1, research_search_text(agent.name, run, display_name))
+            row = ResearchRow(
+                title,
+                agent.name,
+                compact_date(run_timestamp(run)),
+                lambda _=False, a=agent, r=run: self.rename_research(a, r),
             )
-            item.setData(
-                Qt.ItemDataRole.UserRole, {"agent_id": agent.id, "run_id": run.id}
-            )
-            item.setSizeHint(QSize(220, 66))
             self.research_list.addItem(item)
+            self.research_list.setItemWidget(item, row)
+            if key == current_key:
+                self.research_list.setCurrentItem(item)
         if not research:
             item = QListWidgetItem("No research runs yet")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
-            item.setSizeHint(QSize(220, 36))
             self.research_list.addItem(item)
-        self.view_all_research.setVisible(len(research) > RECENT_RESEARCH_LIMIT)
+        self._filter_research(self.research_search.text())
         self.research_list.sync_height()
+        self._sync_research_row_selection()
+
+    def _filter_research(self, text: str) -> None:
+        query = text.casefold().strip()
+        for index in range(self.research_list.count()):
+            item = self.research_list.item(index)
+            haystack = item.data(Qt.ItemDataRole.UserRole + 1)
+            if haystack is None:
+                continue
+            self.research_list.set_hidden(item, bool(query) and query not in haystack)
+        self.research_list.sync_height()
+
+    def _sync_research_row_selection(self) -> None:
+        current = self.research_list.currentItem()
+        for index in range(self.research_list.count()):
+            item = self.research_list.item(index)
+            row = self.research_list.itemWidget(item)
+            if isinstance(row, ResearchRow):
+                row.set_selected(item is current)
+
+    def _select_research_item(self, agent_id: str, run_id: str) -> None:
+        for index in range(self.research_list.count()):
+            item = self.research_list.item(index)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict) and data.get("agent_id") == agent_id and data.get("run_id") == run_id:
+                self.research_list.blockSignals(True)
+                self.research_list.setCurrentItem(item)
+                self.research_list.blockSignals(False)
+                self._sync_research_row_selection()
+                return
+        self.research_list.blockSignals(True)
+        self.research_list.setCurrentItem(None)
+        self.research_list.blockSignals(False)
+        self._sync_research_row_selection()
+
+    def _select_process_item(self, key: dict[str, Any] | None) -> None:
+        self.process_list.blockSignals(True)
+        if key is None:
+            self.process_list.setCurrentItem(None)
+        else:
+            for index in range(self.process_list.count()):
+                item = self.process_list.item(index)
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(data, dict) and data.get("kind") == key.get("kind") and (
+                    data.get("agent_id") == key.get("agent_id")
+                    or data.get("process_id") == key.get("process_id")
+                ):
+                    self.process_list.setCurrentItem(item)
+                    break
+            else:
+                self.process_list.setCurrentItem(None)
+        self.process_list.blockSignals(False)
+        self._sync_process_row_selection()
+
+    def _clear_agent_selection(self) -> None:
+        self.agent_list.blockSignals(True)
+        self.agent_list.setCurrentItem(None)
+        self.agent_list.blockSignals(False)
+        self._sync_agent_row_selection()
+
+    def _clear_research_selection(self) -> None:
+        self.research_list.blockSignals(True)
+        self.research_list.setCurrentItem(None)
+        self.research_list.blockSignals(False)
+        self._sync_research_row_selection()
+
+    def _clear_process_selection(self) -> None:
+        self._select_process_item(None)
+
+    def _clear_active_export_view(self) -> None:
+        """Detach from whichever export process view is on screen. The event
+        log itself is untouched, so returning to it later just replays it."""
+        self._active_export_timeline = None
+        self._active_export_process_id = None
 
     def _load_all_runs(self) -> None:
         if not self.client or self._runs_loading or not self.agents:
@@ -601,8 +1285,7 @@ class MainWindow(QMainWindow):
                 self.runs[agent_id] = values
             self._render_agent_list()
             self._populate_research()
-            if self.selected_agent_id in self.agents:
-                self.show_agent(str(self.selected_agent_id))
+            self._restore_current_page()
 
         self._run_worker(
             fetch,
@@ -630,8 +1313,7 @@ class MainWindow(QMainWindow):
             self.runs[agent_id] = values
             self._render_agent_list()
             self._populate_research()
-            if self.selected_agent_id == agent_id:
-                self.show_agent(agent_id)
+            self._restore_current_page()
 
         self._run_worker(fetch, loaded, label="Loading research runs…")
 
@@ -655,8 +1337,6 @@ class MainWindow(QMainWindow):
             None,
         )
         if agent and run:
-            self.selected_agent_id = agent.id
-            self._select_agent_item(agent.id)
             self.show_run(agent, run)
 
     def _select_agent_item(self, agent_id: str) -> None:
@@ -670,7 +1350,14 @@ class MainWindow(QMainWindow):
                 return
 
     def show_agent(self, agent_id: str) -> None:
+        is_refresh = self._current_page == ("agent", agent_id)
+        saved_scroll = self._capture_detail_scroll_state() if is_refresh else {}
         self.selected_agent_id = agent_id
+        self._current_page = ("agent", agent_id)
+        self._clear_active_export_view()
+        self._select_agent_item(agent_id)
+        self._clear_research_selection()
+        self._clear_process_selection()
         agent = self.agents[agent_id]
         known_runs = self.runs.get(agent_id)
         page = QWidget()
@@ -682,36 +1369,41 @@ class MainWindow(QMainWindow):
         body = QWidget()
         layout = QVBoxLayout(body)
         layout.setSpacing(14)
-        header = QHBoxLayout()
         title_box = QVBoxLayout()
+        title_row = QHBoxLayout()
         title = QLabel(agent.name)
         title.setObjectName("title")
+        title_row.addWidget(title)
+        title_row.addWidget(
+            icon_action_button("pencil", f"Rename {agent.name}", lambda: self.quick_rename_agent(agent))
+        )
+        title_row.addStretch()
+        title_row.addLayout(
+            icon_toolbar(
+                (
+                    ("gear", "Edit agent settings", lambda: self.edit_agent(agent)),
+                    ("copy", "Copy Agent ID", lambda: QApplication.clipboard().setText(agent.id)),
+                    (
+                        "folder",
+                        "Open Export Folder",
+                        lambda: open_in_explorer(Path(self.settings.export_folder)),
+                    ),
+                    ("trash", f"Delete {agent.name}", lambda: self.delete_agent(agent)),
+                )
+            )
+        )
+        title_box.addLayout(title_row)
         status = agent_display_status(agent, known_runs or [])
         mode = "Recurring" if agent.is_recurring else "One-time"
-        title_box.addWidget(title)
         title_box.addWidget(muted(f"{mode} · {status}"))
         latest = max(known_runs or [], key=run_timestamp, default=None)
         title_box.addWidget(
             muted(f"Last Research: {human_date(run_timestamp(latest) if latest else agent.last_run_at)}")
         )
-        header.addLayout(title_box, 1)
-        more = QToolButton()
-        more.setText("•••")
-        more.setToolTip("More Agent actions")
-        more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        menu = QMenu(more)
-        copy_id = QAction("Copy Agent ID", menu)
-        copy_id.triggered.connect(lambda: QApplication.clipboard().setText(agent.id))
-        menu.addAction(copy_id)
-        open_folder = QAction("Open Export Folder", menu)
-        open_folder.triggered.connect(lambda: open_in_explorer(Path(self.settings.export_folder)))
-        menu.addAction(open_folder)
-        more.setMenu(menu)
-        header.addWidget(more)
-        layout.addLayout(header)
+        layout.addLayout(title_box)
 
         overview, overview_layout = card()
-        overview_layout.addWidget(section_label("Agent configuration"))
+        overview_layout.addWidget(card_heading("Agent configuration"))
         config_splitter = QSplitter(Qt.Orientation.Horizontal)
         config_splitter.setObjectName("configurationSplitter")
         config_splitter.setChildrenCollapsible(False)
@@ -720,43 +1412,74 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 5, 12, 0)
         left_layout.setSpacing(9)
-        left_layout.addWidget(QLabel("Intent"))
+        left_layout.addWidget(section_label("Intent"))
+        intent_box = QFrame()
+        intent_box.setObjectName("intentBox")
+        intent_box_layout = QVBoxLayout(intent_box)
+        intent_box_layout.setContentsMargins(14, 12, 14, 12)
         intent = QLabel(agent.intent or "No intent returned")
         intent.setWordWrap(True)
         intent.setObjectName("bodyText")
-        left_layout.addWidget(intent)
-        left_layout.addWidget(section_label("Platforms"))
-        left_layout.addWidget(muted(" · ".join(value.title() for value in agent.platforms) or "—"))
-        for label, value in (
-            ("Language", "English only" if agent.english_only else "All languages"),
+        intent_box_layout.addWidget(intent)
+        left_layout.addWidget(intent_box)
+        left_layout.addWidget(section_label("Sources"))
+        platform_row = QHBoxLayout()
+        platform_row.setSpacing(6)
+        for value in agent.platforms:
+            label_text = "Meta Ads" if value == "meta_ads" else value.title()
+            platform_row.addWidget(pill(label_text))
+        platform_row.addStretch()
+        platform_host = QWidget()
+        platform_host.setLayout(platform_row)
+        left_layout.addWidget(platform_host)
+
+        left_layout.addWidget(section_label("Configuration"))
+        di_enabled = agent.data_intelligence_enabled
+        config_grid = FlowLayout(spacing=8)
+        for label_text, value_text, state in (
+            ("Language", "English only" if agent.english_only else "All languages", "neutral"),
+            ("Type", mode, "neutral"),
+            ("Data Intelligence", "● ON" if di_enabled else "● OFF", "on" if di_enabled else "off"),
             (
-                "Data Intelligence",
-                f"{'On' if agent.data_intelligence_enabled else 'Off'} · +${BillingSafety.DATA_INTELLIGENCE_ADDON:.2f}/research",
+                "Meta Ads",
+                "● ON" if agent.meta_ads_enabled else "● OFF",
+                "on" if agent.meta_ads_enabled else "off",
             ),
-            ("Meta Ads", "On" if agent.meta_ads_enabled else "Off"),
-            ("Type", mode),
-            ("Cadence", agent.cadence or "—"),
+            ("Cadence", agent.cadence or "—", "neutral"),
         ):
-            row = QHBoxLayout()
-            row.addWidget(muted(label))
-            row.addStretch()
-            row.addWidget(QLabel(value))
-            left_layout.addLayout(row)
+            config_grid.addWidget(mini_card(label_text, value_text, state))
+        config_grid_host = QWidget()
+        config_grid_host.setLayout(config_grid)
+        left_layout.addWidget(config_grid_host)
+
+        left_layout.addWidget(section_label("Activity"))
+        activity_fields = [
+            ("Created", human_date(agent.created_at)),
+            ("Researches", str(len(known_runs or []))),
+            ("Last Research", human_date(run_timestamp(latest) if latest else agent.last_run_at)),
+            ("Keywords", f"{len(agent.keywords)}"),
+        ]
+        if agent.is_recurring and agent.next_run_at:
+            activity_fields.append(("Next Research", human_date(agent.next_run_at)))
+        activity_grid = FlowLayout(spacing=8)
+        for label_text, value_text in activity_fields:
+            activity_grid.addWidget(mini_card(label_text, value_text))
+        activity_grid_host = QWidget()
+        activity_grid_host.setLayout(activity_grid)
+        left_layout.addWidget(activity_grid_host)
+        left_layout.addStretch()
+
         actions = QHBoxLayout()
-        new_research = QPushButton("New Research")
-        new_research.setObjectName("primary")
-        new_research.clicked.connect(lambda: self.show_new_research(agent.id))
-        edit = QPushButton("Edit Agent")
-        edit.clicked.connect(lambda: self.edit_agent(agent))
-        actions.addWidget(new_research)
-        actions.addWidget(edit)
+        actions.addStretch()
         if agent.is_recurring:
             toggle = QPushButton("Pause" if agent.active else "Resume")
             toggle.clicked.connect(lambda: self.toggle_agent(agent))
             actions.addWidget(toggle)
-        actions.addStretch()
+        new_research = QPushButton("New Research")
+        new_research.setObjectName("primary")
+        new_research.clicked.connect(lambda: self.show_new_research(agent.id))
+        actions.addWidget(new_research)
         left_layout.addLayout(actions)
-        left_layout.addStretch()
         config_splitter.addWidget(left)
 
         keywords_panel = QFrame()
@@ -788,138 +1511,500 @@ class MainWindow(QMainWindow):
         )
         overview_layout.addWidget(config_splitter)
         layout.addWidget(overview)
-        layout.addWidget(section_label("Research Runs"))
+        layout.addWidget(card_heading("Research Runs"))
         if known_runs is None:
             layout.addWidget(muted("Loading research runs…"))
             self._load_runs(agent_id)
         elif not known_runs:
             layout.addWidget(muted("No research runs yet"))
         else:
+            runs_flow = FlowLayout(spacing=12)
+            runs_host = QWidget()
+            runs_host.setLayout(runs_flow)
             for run in sorted(known_runs, key=run_timestamp, reverse=True):
-                layout.addWidget(self._run_card(agent, run))
+                runs_flow.addWidget(self._run_card(agent, run))
+            layout.addWidget(runs_host)
         layout.addStretch()
         scroll.setWidget(body)
         page_layout.addWidget(scroll)
         self._show_page(page)
+        self._restore_detail_scroll_state(saved_scroll)
 
     def _run_card(self, agent: Agent, run: Run) -> QFrame:
         frame, layout = card()
+        frame.setMaximumWidth(520)
+        number = run.local_number or 0
+        display_name = self.database.research_display_name(agent.id, run.id)
         top = QHBoxLayout()
-        title = QLabel(f"Research #{(run.local_number or 0):03d}")
+        title = QLabel(display_name or f"Research #{number:03d}")
         title.setObjectName("cardTitle")
-        status = QLabel(run.status.replace("_", " ").title())
-        status.setObjectName(
-            "connected" if run.status in {"completed", "partial_failure"} else "muted"
-        )
         top.addWidget(title)
-        top.addStretch()
-        top.addWidget(status)
-        layout.addLayout(top)
-        layout.addWidget(muted(human_date(run_timestamp(run))))
-        metrics = (
-            f"Videos {run.videos_linked:,}    ·    Slideshows {run.slideshows_linked:,}    ·    "
-            f"Ads {run.meta_ads_linked:,}    ·    Outliers {run.outliers_identified:,}"
+        top.addWidget(
+            icon_action_button("pencil", "Rename locally", lambda: self.rename_research(agent, run))
         )
-        layout.addWidget(muted(metrics))
-        actions = QHBoxLayout()
-        open_button = QPushButton("Open")
-        open_button.clicked.connect(lambda: self.show_run(agent, run))
-        export = QPushButton("Export for AI")
+        top.addStretch()
+        top.addWidget(
+            status_badge(run.status.replace("_", " "), RUN_STATUS_STATE.get(run.status.casefold(), "neutral"))
+        )
+        layout.addLayout(top)
+        subtitle = f"Research #{number:03d} · {human_date(run_timestamp(run))}"
+        if display_name:
+            subtitle = f"Research #{number:03d} · {agent.name} · {human_date(run_timestamp(run))}"
+        layout.addWidget(muted(subtitle))
+
+        metrics_flow = FlowLayout(spacing=8)
+        metrics_host = QWidget()
+        metrics_host.setLayout(metrics_flow)
+        for label_text, value_text in self._run_metrics(run):
+            metrics_flow.addWidget(metric_card(label_text, value_text))
+        layout.addWidget(metrics_host)
+
+        actions = icon_toolbar(
+            (
+                ("workflow", "Open Research", lambda: self.show_run(agent, run)),
+                (
+                    "folder",
+                    "Open Export Folder",
+                    lambda: open_in_explorer(Path(self.settings.export_folder)),
+                ),
+                ("copy", "Copy Run ID", lambda: QApplication.clipboard().setText(run.id)),
+                ("trash", "Hide locally", lambda: self.hide_research_locally(agent, run)),
+            )
+        )
+        actions.addStretch()
+        export = QPushButton("Export")
         export.setObjectName("primary")
         export.setEnabled(run.status in {"completed", "partial_failure"})
         export.clicked.connect(lambda: self.start_export(agent, run))
-        actions.addWidget(open_button)
         actions.addWidget(export)
+        layout.addLayout(actions)
+        return frame
+
+    @staticmethod
+    def _run_metrics(run: Run) -> list[tuple[str, str]]:
+        """Only metrics with real data on the Run itself -- no invented
+        tiles, and no extra API calls made just to populate the UI."""
+        raw = run.raw or {}
+        metrics = [
+            ("Videos", f"{run.videos_linked:,}"),
+            ("Slideshows", f"{run.slideshows_linked:,}"),
+            ("Meta Ads", f"{run.meta_ads_linked:,}"),
+            ("Outliers", f"{run.outliers_identified:,}"),
+        ]
+        trends = raw.get("trends_detected")
+        if isinstance(trends, int):
+            metrics.append(("Trends", f"{trends:,}"))
+        return metrics
+
+    @staticmethod
+    def _platform_pills(agent: Agent, run: Run) -> list[tuple[str, int | None]]:
+        """One pill per Platform the Agent is actually configured for, with
+        its real linked count when Virlo provides one -- Meta Ads counts as
+        the fourth Platform here, never folded into the Videos total."""
+        raw = run.raw or {}
+        counts = {
+            "youtube": raw.get("youtube_count"),
+            "tiktok": raw.get("tiktok_count"),
+            "instagram": raw.get("instagram_count"),
+            "meta_ads": run.meta_ads_linked or raw.get("meta_ads_count"),
+        }
+        return [
+            ("Meta Ads" if value == "meta_ads" else value.title(), counts.get(value))
+            for value in agent.platforms
+        ]
+
+    @staticmethod
+    def _read_export_report_payload(export_dir: str) -> dict[str, Any]:
+        path = Path(export_dir) / export_report.REPORT_FILENAME
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _read_export_summary(cls, export_dir: str) -> dict[str, Any]:
+        summary = cls._read_export_report_payload(export_dir).get("summary")
+        return summary if isinstance(summary, dict) else {}
+
+    @staticmethod
+    def _export_duration_text(export_record: dict[str, Any]) -> str | None:
+        started, completed = export_record.get("started_at"), export_record.get("completed_at")
+        if not started or not completed:
+            return None
+        try:
+            start = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+            end = datetime.fromisoformat(str(completed).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        seconds = max(0, int((end - start).total_seconds()))
+        minutes, seconds = divmod(seconds, 60)
+        return f"{minutes}m {seconds:02d}s"
+
+    def _ensure_report_path(self, agent: Agent, export_record: dict[str, Any]) -> Path | None:
+        export_dir = Path(export_record["path"])
+        if not export_dir.exists():
+            show_error(self, "Export folder missing", "This export's folder no longer exists on disk.")
+            return None
+        return export_report.ensure_report(
+            export_dir,
+            export_row=export_record,
+            stages=self.database.export_stages(export_record["id"]),
+            agent_name=agent.name,
+        )
+
+    def open_export_report(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+        """"Report" = open EXPORT_REPORT.json itself in its default app."""
+        path = self._ensure_report_path(agent, export_record)
+        if path is not None:
+            open_in_explorer(path)
+
+    def reveal_export_report(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+        """"Show File" = reveal EXPORT_REPORT.json selected in Explorer."""
+        path = self._ensure_report_path(agent, export_record)
+        if path is not None:
+            reveal_in_explorer(path)
+
+    def show_export_diagnostics(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+        payload = self._read_export_report_payload(export_record["path"])
+        dialog = ExportDiagnosticsDialog(
+            export_record["export_number"],
+            payload.get("errors") or [],
+            payload.get("warnings") or [],
+            payload.get("notices") or [],
+            self,
+        )
+        dialog.openReportRequested.connect(lambda: self.open_export_report(agent, run, export_record))
+        dialog.exec()
+
+    def _confirm_delete_export(self, number: int, research_number: int, size_text: str) -> bool:
+        """Isolated so tests can stub the modal confirmation without
+        blocking on a real QMessageBox event loop."""
+        message = (
+            f"This will move this export's local files to the Recycle Bin.\n\n"
+            f"Files: ~{size_text}\n\n"
+            f"Research #{research_number:03d} and Virlo data will NOT be deleted.\n\n"
+            "You can restore it from the Recycle Bin afterward if needed."
+        )
+        confirm = QMessageBox(self)
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setWindowTitle(f"Delete Export #{number:03d}?")
+        confirm.setText(f"MOVE EXPORT #{number:03d} TO RECYCLE BIN?")
+        confirm.setInformativeText(message)
+        delete_button = confirm.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        confirm.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        confirm.setDefaultButton(delete_button)
+        confirm.exec()
+        return confirm.clickedButton() is delete_button
+
+    def delete_export_to_recycle_bin(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+        if str(export_record["status"]) == "running":
+            QMessageBox.information(
+                self, "Export is running", "Cancel the export first, then delete it once it has stopped."
+            )
+            return
+        export_dir = Path(export_record["path"]) if export_record["path"] else None
+        size_text = format_bytes(directory_size(export_dir)) if export_dir and export_dir.exists() else "0 B"
+        if not self._confirm_delete_export(
+            export_record["export_number"], export_record.get("research_number", 0), size_text
+        ):
+            return
+        if export_dir is not None:
+            delete_directory(export_dir)
+        self.database.delete_export(export_record["id"])
+        self.show_run(agent, run)
+
+    def _export_card(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> QFrame:
+        frame, layout = card()
+        frame.setMaximumWidth(480)
+        status = str(export_record["status"])
+        state = RUN_STATUS_STATE.get(status.casefold(), "neutral")
+        export_dir = Path(export_record["path"]) if export_record["path"] else None
+        files_missing = export_dir is None or not export_dir.exists()
+
+        top = QHBoxLayout()
+        title = QLabel(f"Export #{export_record['export_number']:03d}")
+        title.setObjectName("cardTitle")
+        top.addWidget(title)
+        top.addStretch()
+        badge = ClickableStatusBadge(display_status_text(status), state)
+        has_diagnostic_reason = status in {"failed", "cancelled", "complete_with_warnings"}
+        if has_diagnostic_reason and not files_missing:
+            badge.setToolTip("Click for diagnostic details")
+            badge.clicked.connect(
+                lambda _=False, record=export_record: self.show_export_diagnostics(agent, run, record)
+            )
+        top.addWidget(badge)
+        layout.addLayout(top)
+        layout.addWidget(
+            muted(human_date(export_record.get("completed_at") or export_record.get("started_at")))
+        )
+
+        if files_missing:
+            layout.addWidget(muted("Files missing — this export's local folder no longer exists."))
+            actions = icon_toolbar(
+                (
+                    (
+                        "workflow",
+                        "View process",
+                        lambda _=False, record=export_record: self.open_export_history(
+                            agent, run, record
+                        ),
+                    ),
+                )
+            )
+            actions.addStretch()
+            actions.addWidget(
+                icon_action_button(
+                    "trash",
+                    "Delete (moves to Recycle Bin)",
+                    lambda _=False, record=export_record: self.delete_export_to_recycle_bin(
+                        agent, run, record
+                    ),
+                )
+            )
+            layout.addLayout(actions)
+            return frame
+
+        summary = self._read_export_summary(export_record["path"])
+        metrics: list[tuple[str, str]] = []
+        if status == "cancelled":
+            # A cancelled export usually has little or no real data -- show
+            # what actually happened (where it stopped) rather than padding
+            # the card with meaningless zeroed-out metric tiles.
+            interrupted_stage = summary.get("interrupted_stage")
+            if interrupted_stage:
+                metrics.append(("Stage", str(interrupted_stage).replace("_", " ").title()))
+            if isinstance(summary.get("interrupted_page"), int):
+                metrics.append(("Page", str(summary["interrupted_page"])))
+            duration = self._export_duration_text(export_record)
+            if duration:
+                metrics.append(("Duration", duration))
+            if summary.get("videos"):
+                metrics.append(("Videos", f"{summary['videos']:,}"))
+        else:
+            if summary.get("dataset_bytes"):
+                metrics.append(("AI Dataset", format_bytes(summary["dataset_bytes"])))
+            if summary.get("raw_bytes"):
+                metrics.append(("RAW Data", format_bytes(summary["raw_bytes"])))
+            if summary.get("videos"):
+                metrics.append(("Videos", f"{summary['videos']:,}"))
+            if summary.get("warnings"):
+                metrics.append(("Warnings", str(summary["warnings"])))
+        if not metrics:
+            layout.addWidget(muted("No export data produced."))
+        else:
+            metrics_row = FlowLayout(spacing=8)
+            metrics_host = QWidget()
+            metrics_host.setLayout(metrics_row)
+            for label_text, value_text in metrics:
+                metrics_row.addWidget(metric_card(label_text, value_text))
+            layout.addWidget(metrics_host)
+
+        actions = icon_toolbar(
+            (
+                (
+                    "workflow",
+                    "View process",
+                    lambda _=False, record=export_record: self.open_export_history(
+                        agent, run, record
+                    ),
+                ),
+                (
+                    "folder",
+                    "Open folder",
+                    lambda _=False, path=export_record["path"]: open_in_explorer(Path(path)),
+                ),
+                (
+                    "document",
+                    "Open report"
+                    if has_diagnostic_reason
+                    else "No diagnostic report issues for this export.",
+                    lambda _=False, record=export_record: self.open_export_report(
+                        agent, run, record
+                    ),
+                    has_diagnostic_reason,
+                ),
+            )
+        )
         actions.addStretch()
+        actions.addWidget(
+            icon_action_button(
+                "trash",
+                "Delete (moves to Recycle Bin)",
+                lambda _=False, record=export_record: self.delete_export_to_recycle_bin(
+                    agent, run, record
+                ),
+            )
+        )
         layout.addLayout(actions)
         return frame
 
     def show_run(self, agent: Agent, run: Run) -> None:
+        is_refresh = self._current_page == ("run", agent.id, run.id)
+        saved_scroll = self._capture_detail_scroll_state() if is_refresh else {}
+        self.selected_agent_id = agent.id
+        self._current_page = ("run", agent.id, run.id)
+        self._clear_active_export_view()
+        self._clear_agent_selection()
+        self._select_research_item(agent.id, run.id)
+        self._clear_process_selection()
         page = QWidget()
         root = QVBoxLayout(page)
         root.setContentsMargins(28, 24, 28, 24)
-        top = QHBoxLayout()
-        back = QPushButton("← Agent")
-        back.clicked.connect(lambda: self.show_agent(agent.id))
-        top.addWidget(back)
-        top.addStretch()
-        root.addLayout(top)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
         layout = QVBoxLayout(body)
-        title = QLabel(f"Research #{(run.local_number or 0):03d}")
+        layout.setSpacing(14)
+        number = run.local_number or 0
+        display_name = self.database.research_display_name(agent.id, run.id)
+        header_box = QVBoxLayout()
+        header_box.setSpacing(2)
+        title_row = QHBoxLayout()
+        title = QLabel(display_name or f"Research #{number:03d}")
         title.setObjectName("title")
-        layout.addWidget(title)
-        layout.addWidget(muted(f"{agent.name} · {human_date(run_timestamp(run))}"))
-        detail, details = card()
-        details.addWidget(section_label("Run details"))
-        fields = [
+        title_row.addWidget(title)
+        title_row.addLayout(
+            icon_toolbar(
+                (
+                    ("pencil", "Rename research", lambda: self.rename_research(agent, run)),
+                    (
+                        "copy",
+                        "Copy Run ID",
+                        lambda: QApplication.clipboard().setText(run.id),
+                    ),
+                    (
+                        "folder",
+                        "Open Export Folder",
+                        lambda: open_in_explorer(Path(self.settings.export_folder)),
+                    ),
+                    (
+                        "trash",
+                        "Hide from Virlo Exporter (local only)",
+                        lambda: self.hide_research_locally(agent, run),
+                    ),
+                )
+            )
+        )
+        title_row.addStretch()
+        status_state = RUN_STATUS_STATE.get(run.status.casefold(), "neutral")
+        title_row.addWidget(status_badge(run.status.replace("_", " "), status_state))
+        header_box.addLayout(title_row)
+        if display_name:
+            header_box.addWidget(muted(f"Research #{number:03d} · {agent.name}"))
+        else:
+            header_box.addWidget(muted(agent.name))
+        header_box.addWidget(muted(human_date(run_timestamp(run))))
+        layout.addLayout(header_box)
+
+        metrics_flow = FlowLayout(spacing=10)
+        metrics_host = QWidget()
+        metrics_host.setLayout(metrics_flow)
+        for label_text, value_text in self._run_metrics(run):
+            metrics_flow.addWidget(metric_card(label_text, value_text))
+        layout.addWidget(metrics_host)
+
+        platforms, platforms_layout = card()
+        platforms_layout.addWidget(card_heading("Platforms"))
+        platform_row = QHBoxLayout()
+        platform_row.setSpacing(6)
+        for label_text, count in self._platform_pills(agent, run):
+            platform_row.addWidget(pill(f"{label_text}   {count:,}" if isinstance(count, int) else label_text))
+        platform_row.addStretch()
+        platform_host = QWidget()
+        platform_host.setLayout(platform_row)
+        platforms_layout.addWidget(platform_host)
+        layout.addWidget(platforms)
+
+        compact_row = FlowLayout(spacing=14)
+        compact_host = QWidget()
+        compact_host.setLayout(compact_row)
+
+        run_info, run_info_layout = card()
+        run_info.setMaximumWidth(520)
+        run_info_layout.addWidget(card_heading("Run info"))
+        duration = "—"
+        if run.execution_time_ms:
+            total_seconds = int(run.execution_time_ms / 1000)
+            minutes, seconds = divmod(total_seconds, 60)
+            duration = f"{minutes}m {seconds:02d}s"
+        run_info_grid = FlowLayout(spacing=8)
+        run_info_fields = [
+            ("Started", compact_date(run.started_at)),
+            ("Completed", compact_date(run.completed_at)),
+            ("Duration", duration),
+            ("Keywords", str(len(agent.keywords))),
             ("Status", run.status.replace("_", " ").title()),
-            ("Started", human_date(run.started_at)),
-            ("Completed", human_date(run.completed_at)),
-            ("Videos", f"{run.videos_linked:,}"),
-            ("Slideshows", f"{run.slideshows_linked:,}"),
-            ("Meta ads", f"{run.meta_ads_linked:,}"),
-            ("Outliers", f"{run.outliers_identified:,}"),
+            ("Cadence", agent.cadence or "—"),
+        ]
+        for field_label, field_value in run_info_fields:
+            run_info_grid.addWidget(mini_card(field_label, field_value))
+        run_info_grid_host = QWidget()
+        run_info_grid_host.setLayout(run_info_grid)
+        run_info_layout.addWidget(run_info_grid_host)
+        compact_row.addWidget(run_info)
+
+        intelligence, intelligence_layout = card()
+        intelligence.setMaximumWidth(420)
+        intelligence_layout.addWidget(card_heading("Intelligence"))
+        analysis_data = agent.raw.get("analysis_data")
+        analysis_ready = bool(analysis_data)
+        theme_count = len(analysis_data.get("themes", [])) if isinstance(analysis_data, dict) else 0
+        intelligence_grid = FlowLayout(spacing=8)
+        intelligence_fields = [
             (
-                "Execution",
-                f"{(run.execution_time_ms or 0) / 60000:.1f} min" if run.execution_time_ms else "—",
+                "Data Intelligence",
+                "● Enabled" if agent.data_intelligence_enabled else "● Disabled",
+                "on" if agent.data_intelligence_enabled else "off",
+            ),
+            (
+                "Meta Ads",
+                "● Enabled" if agent.meta_ads_enabled else "● Disabled",
+                "on" if agent.meta_ads_enabled else "off",
+            ),
+            (
+                "Analysis",
+                f"● Ready · {theme_count} themes" if analysis_ready else "● Not available",
+                "on" if analysis_ready else "off",
+            ),
+            (
+                "Hooks",
+                "● Available" if agent.data_intelligence_enabled else "● Requires Data Intelligence",
+                "on" if agent.data_intelligence_enabled else "off",
             ),
         ]
-        for name, value in fields:
-            row = QHBoxLayout()
-            row.addWidget(muted(name))
-            row.addStretch()
-            row.addWidget(QLabel(str(value)))
-            details.addLayout(row)
-        layout.addWidget(detail)
-        export = QPushButton("Export for AI")
+        for field_label, field_value, field_state in intelligence_fields:
+            intelligence_grid.addWidget(mini_card(field_label, field_value, field_state))
+        intelligence_grid_host = QWidget()
+        intelligence_grid_host.setLayout(intelligence_grid)
+        intelligence_layout.addWidget(intelligence_grid_host)
+        compact_row.addWidget(intelligence)
+        layout.addWidget(compact_host)
+
+        export = QPushButton("Export")
         export.setObjectName("primary")
         export.setMinimumHeight(44)
         export.setEnabled(run.status in {"completed", "partial_failure"})
         export.clicked.connect(lambda: self.start_export(agent, run))
         layout.addWidget(export)
         history = self.database.export_history(agent.id, run.id)
-        layout.addWidget(section_label("Exports"))
+        layout.addWidget(card_heading("Exports"))
         if not history:
             layout.addWidget(muted("No local exports yet."))
-        for item in history:
-            row = QHBoxLayout()
-            row.addWidget(QLabel(f"Export #{item['export_number']:03d}"))
-            row.addWidget(muted(human_date(item.get("completed_at") or item.get("started_at"))))
-            row.addStretch()
-            row.addWidget(QLabel(str(item["status"]).title()))
-            open_button = QPushButton("Open Folder")
-            open_button.clicked.connect(
-                lambda _=False, path=item["path"]: open_in_explorer(Path(path))
-            )
-            row.addWidget(open_button)
-            layout.addLayout(row)
+        else:
+            exports_flow = FlowLayout(spacing=14)
+            exports_host = QWidget()
+            exports_host.setLayout(exports_flow)
+            for item in history:
+                exports_flow.addWidget(self._export_card(agent, run, item))
+            layout.addWidget(exports_host)
         layout.addStretch()
         scroll.setWidget(body)
         root.addWidget(scroll)
         self._show_page(page)
-
-    def show_all_research(self) -> None:
-        page = QWidget()
-        root = QVBoxLayout(page)
-        root.setContentsMargins(28, 24, 28, 24)
-        title = QLabel("All Research")
-        title.setObjectName("title")
-        root.addWidget(title)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body = QWidget()
-        layout = QVBoxLayout(body)
-        for agent, run in self._all_research():
-            layout.addWidget(self._run_card(agent, run))
-        layout.addStretch()
-        scroll.setWidget(body)
-        root.addWidget(scroll)
-        self._show_page(page)
+        self._restore_detail_scroll_state(saved_scroll)
 
     def show_new_agent(self) -> None:
         if not self.client:
@@ -1022,6 +2107,54 @@ class MainWindow(QMainWindow):
             label=f"{action.title()}ing Agent…",
         )
 
+    def quick_rename_agent(self, agent: Agent) -> None:
+        if not self.client:
+            return
+        dialog = RenameDialog("Rename Agent", agent.name, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_name = dialog.value()
+        client = self.client
+        self._run_worker(
+            lambda: client.update_agent(agent.id, {"name": new_name}),
+            lambda _result: self.refresh(),
+            label="Renaming Agent…",
+        )
+
+    def rename_research(self, agent: Agent, run: Run) -> None:
+        current_name = self.database.research_display_name(agent.id, run.id) or (
+            f"Research #{(run.local_number or 0):03d}"
+        )
+        dialog = RenameDialog(
+            "Rename Research", current_name, self, context=f"{agent.name} · local name only"
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.database.rename_research(agent.id, run.id, dialog.value())
+        self._populate_research()
+        if self._current_page[:1] == ("run",) and self._current_page[1:] == (agent.id, run.id):
+            self.show_run(agent, run)
+
+    def _confirm_hide_research(self, agent: Agent, run: Run) -> bool:
+        answer = QMessageBox.warning(
+            self,
+            "Hide Research",
+            "This removes the research from Virlo Exporter's lists only -- there is no Virlo "
+            "API endpoint to delete a Run, so nothing is removed from your Virlo account. Any "
+            "exports already saved to disk are kept and can still be opened from their folder.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def hide_research_locally(self, agent: Agent, run: Run) -> None:
+        if not self._confirm_hide_research(agent, run):
+            return
+        self.database.hide_research(agent.id, run.id)
+        self.runs[agent.id] = [value for value in self.runs.get(agent.id, []) if value.id != run.id]
+        self._populate_research()
+        self.show_agent(agent.id)
+
     def edit_agent(self, agent: Agent) -> None:
         if not self.client:
             return
@@ -1079,6 +2212,11 @@ class MainWindow(QMainWindow):
         data = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(data, dict):
             return
+        self._current_page = ("process", data.get("kind"), data.get("agent_id"), data.get("process_id"))
+        self._clear_active_export_view()
+        self._clear_agent_selection()
+        self._clear_research_selection()
+        self._select_process_item(data)
         if data.get("kind") == "server":
             agent = self.agents.get(str(data.get("agent_id")))
             if not agent:
@@ -1102,6 +2240,8 @@ class MainWindow(QMainWindow):
                 )
             layout.addStretch()
             self._show_page(page)
+        elif self._open_export_process(data):
+            return
         else:
             page = QWidget()
             layout = QVBoxLayout(page)
@@ -1130,32 +2270,14 @@ class MainWindow(QMainWindow):
             return
         self.export_cancel = Event()
         process_id = f"export:{agent.id}:{run.id}"
-        label = f"Export Research #{(run.local_number or 0):03d}"
+        number = run.local_number or 0
+        label = f"Export Research #{number:03d}"
         self.database.upsert_process(
             process_id, "export", label, "running", {"stage": "starting"}
         )
+        self._live_export_events[process_id] = []
         self._populate_processes()
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(35, 30, 35, 30)
-        layout.addWidget(section_label("Local Export Process"))
-        title = QLabel(label)
-        title.setObjectName("title")
-        layout.addWidget(title)
-        stage_label = QLabel("Preparing export…")
-        layout.addWidget(stage_label)
-        bar = QProgressBar()
-        bar.setRange(0, 100)
-        layout.addWidget(bar)
-        layout.addWidget(
-            muted("Export reads existing Agent data and never calls paid enrichment endpoints.")
-        )
-        cancel = QPushButton("Cancel Export")
-        cancel.setObjectName("danger")
-        cancel.clicked.connect(self.export_cancel.set)
-        layout.addWidget(cancel, alignment=Qt.AlignmentFlag.AlignLeft)
-        layout.addStretch()
-        self._show_page(page)
+        self._show_live_export_view(process_id, agent, run)
         client = self.client
 
         def do_export(progress: Any = None) -> ExportResult:
@@ -1172,16 +2294,17 @@ class MainWindow(QMainWindow):
         worker = Worker(do_export, progress=None)
         self.active_workers.add(worker)
 
-        def progress(value: dict[str, Any]) -> None:
-            current = int(value.get("current", 0))
-            total = max(1, int(value.get("total", 1)))
-            percent = min(100, round(current * 100 / total))
-            stage = str(value.get("stage", "export")).replace("_", " ").title()
-            stage_label.setText(stage)
-            bar.setValue(percent)
-            self.database.upsert_process(
-                process_id, "export", label, "running", {"stage": stage, "percent": percent}
-            )
+        def progress(event: dict[str, Any]) -> None:
+            self._live_export_events[process_id].append(event)
+            if self._active_export_process_id == process_id and self._active_export_timeline:
+                self._active_export_timeline.apply_event(event)
+            stage_label = str(event.get("label", "Working"))
+            payload: dict[str, Any] = {"stage": stage_label}
+            current = event.get("current")
+            total = event.get("total")
+            if isinstance(current, int) and isinstance(total, int) and total > 0:
+                payload["percent"] = min(100, round(current * 100 / total))
+            self.database.upsert_process(process_id, "export", label, "running", payload)
             self._populate_processes()
 
         worker.signals.progress.connect(progress)
@@ -1194,55 +2317,164 @@ class MainWindow(QMainWindow):
         worker.signals.finished.connect(lambda: self._worker_finished(worker))
         QThreadPool.globalInstance().start(worker)
 
+    def _current_export_timeline(self, process_id: str) -> ExportTimelineWidget | None:
+        if self._active_export_process_id == process_id:
+            return self._active_export_timeline
+        return None
+
     def _export_done(
         self, process_id: str, result: ExportResult, agent: Agent, run: Run
     ) -> None:
         self.database.upsert_process(
             process_id, "export", "Export", "complete", {"path": str(result.path)}
         )
+        self._live_export_events.pop(process_id, None)
         self._populate_processes()
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(40, 35, 40, 35)
-        layout.addWidget(section_label("Export Complete"))
-        title = QLabel("VIRLO_AI_DATASET.json is ready")
-        title.setObjectName("title")
-        layout.addWidget(title)
-        layout.addWidget(muted(str(result.dataset_path)))
-        if result.warnings:
-            layout.addWidget(
-                muted(
-                    f"Completed with {len(result.warnings)} warning(s). See the embedded manifest and export.log."
-                )
+        warning_count = int(result.statistics.get("warnings", 0))
+        has_warnings = warning_count > 0
+        state = "warning" if has_warnings else "completed"
+        timeline = self._current_export_timeline(process_id)
+        duration_seconds = 0
+        if timeline is not None:
+            timeline.stop_timer()
+            duration_seconds = timeline.elapsed_seconds
+            timeline.set_overall_status(
+                "Complete with warnings" if has_warnings else "Complete", state
             )
-        actions = QHBoxLayout()
-        open_button = QPushButton("Open Folder")
-        open_button.setObjectName("primary")
-        open_button.clicked.connect(lambda: open_in_explorer(result.path))
-        copy = QPushButton("Copy Path")
-        copy.clicked.connect(lambda: QApplication.clipboard().setText(str(result.dataset_path)))
-        back = QPushButton("Back to Research")
-        back.clicked.connect(lambda: self.show_run(agent, run))
-        actions.addWidget(open_button)
-        actions.addWidget(copy)
-        actions.addWidget(back)
-        actions.addStretch()
-        layout.addLayout(actions)
-        layout.addStretch()
-        self._show_page(page)
         if self.settings.open_folder_after_export:
             open_in_explorer(result.path)
+        overlay = ExportCompletionOverlay(
+            state=state,
+            duration_seconds=duration_seconds,
+            stats=result.statistics,
+            warning_count=warning_count,
+            folder_path=result.path,
+            parent=self.centralWidget(),
+        )
+        # Closing the completion overlay always returns to this export's own
+        # Research Detail, regardless of what page happened to be open when
+        # the export actually finished in the background.
+        overlay.closed.connect(lambda: self.show_run(agent, run))
+        overlay.show_over_parent()
+
+    def _cancel_export(self, process_id: str, timeline: ExportTimelineWidget) -> None:
+        """Runs synchronously on click -- the UI reacts instantly regardless
+        of how long the background worker takes to actually notice
+        cancel_event and unwind (network round-trip, cleanup, ...)."""
+        timeline.mark_cancelling()
+        self._cancelling_process_ids.add(process_id)
+        self._populate_processes()
+        if self.export_cancel is not None:
+            self.export_cancel.set()
+
+    def _show_stage_diagnostics(self, agent: Agent, run: Run, event: dict[str, Any]) -> None:
+        dialog = StageDiagnosticsDialog(event, self)
+        dialog.openReportRequested.connect(
+            lambda: self.open_export_report(agent, run, self._latest_export_record(agent, run))
+        )
+        dialog.exec()
+
+    def _latest_export_record(self, agent: Agent, run: Run) -> dict[str, Any]:
+        history = self.database.export_history(agent.id, run.id)
+        return history[0] if history else {}
 
     def _export_failed(
         self, process_id: str, error: Exception | str, details: str
     ) -> None:
-        status = "cancelled" if "ExportCancelled" in details else "failed"
+        cancelled = "ExportCancelled" in details
+        status = "cancelled" if cancelled else "failed"
         self.database.upsert_process(process_id, "export", "Export", status, {})
+        self._cancelling_process_ids.discard(process_id)
+        self._live_export_events.pop(process_id, None)
         self._populate_processes()
-        if status != "cancelled":
-            self._worker_error(error, details)
+        if not cancelled:
+            logger.error("export failed: %s\n%s", error, details)
+        timeline = self._current_export_timeline(process_id)
+        if timeline is not None:
+            timeline.stop_timer()
+            # mark_cancelling() (on click) already froze this UI instantly;
+            # this just confirms the worker has actually finished unwinding.
+            timeline.set_overall_status(
+                "Interrupted" if cancelled else "Failed", "cancelled" if cancelled else "failed"
+            )
+        if cancelled:
+            self.statusBar().showMessage("Export interrupted", 5000)
         else:
-            self.statusBar().showMessage("Export cancelled", 5000)
+            self.statusBar().showMessage("Export failed — see process view for details", 8000)
+
+    def _open_export_process(self, data: dict[str, Any]) -> bool:
+        process_id = str(data.get("process_id") or "")
+        if not process_id.startswith("export:"):
+            return False
+        _, agent_id, run_id = process_id.split(":", 2)
+        agent = self.agents.get(agent_id)
+        run = next((value for value in self.runs.get(agent_id, []) if value.id == run_id), None)
+        if not agent or not run:
+            return False
+        if str(data.get("status")) == "running":
+            self._show_live_export_view(process_id, agent, run)
+            return True
+        history = self.database.export_history(agent_id, run_id)
+        if not history:
+            return False
+        self.open_export_history(agent, run, history[0])
+        return True
+
+    def open_export_history(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+        self._clear_active_export_view()
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(28, 24, 28, 24)
+        timeline = ExportTimelineWidget(live=False)
+        number = run.local_number or 0
+        timeline.set_header(
+            f"EXPORT #{export_record['export_number']:03d}", f"Research #{number:03d} · {agent.name}"
+        )
+        record_status = str(export_record.get("status", ""))
+        state = RUN_STATUS_STATE.get(record_status.casefold(), "neutral")
+        timeline.set_overall_status(display_status_text(record_status), state)
+        timeline.load_history(self.database.export_stages(export_record["id"]))
+        timeline.diagnosticsRequested.connect(
+            lambda event: self._show_stage_diagnostics(agent, run, event)
+        )
+        page_layout.addWidget(timeline)
+        actions = QHBoxLayout()
+        open_button = QPushButton("Open Folder")
+        open_button.clicked.connect(
+            lambda: open_in_explorer(Path(export_record["path"]))
+        )
+        actions.addWidget(open_button)
+        report_button = QPushButton("Report")
+        report_button.clicked.connect(
+            lambda: self.reveal_export_report(agent, run, export_record)
+        )
+        actions.addWidget(report_button)
+        actions.addStretch()
+        back = QPushButton("Back to Research")
+        back.clicked.connect(lambda: self.show_run(agent, run))
+        actions.addWidget(back)
+        page_layout.addLayout(actions)
+        self._show_page(page)
+
+    def _show_live_export_view(self, process_id: str, agent: Agent, run: Run) -> None:
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(28, 24, 28, 24)
+        timeline = ExportTimelineWidget(live=True)
+        number = run.local_number or 0
+        display_name = self.database.research_display_name(agent.id, run.id)
+        subtitle = display_name or f"Research #{number:03d}"
+        timeline.set_header(f"EXPORT · RESEARCH #{number:03d}", f"{subtitle} · {agent.name}")
+        for event in self._live_export_events.get(process_id, []):
+            timeline.apply_event(event)
+        timeline.cancelRequested.connect(lambda: self._cancel_export(process_id, timeline))
+        timeline.diagnosticsRequested.connect(
+            lambda event: self._show_stage_diagnostics(agent, run, event)
+        )
+        page_layout.addWidget(timeline)
+        self._show_page(page)
+        self._active_export_timeline = timeline
+        self._active_export_process_id = process_id
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.settings, self)
@@ -1262,6 +2494,43 @@ class MainWindow(QMainWindow):
             if widget not in {self.placeholder, page}:
                 self.detail.removeWidget(widget)
                 widget.deleteLater()
+
+    def _capture_detail_scroll_state(self) -> dict[str, int]:
+        """Show_agent/show_run fully rebuild their page from scratch on
+        every call, including on every periodic background refresh -- which
+        silently reset scroll position to the top every time. Called before
+        that rebuild, this remembers where the user was scrolled to."""
+        state: dict[str, int] = {}
+        current = self.detail.currentWidget()
+        if current is None:
+            return state
+        scroll_area = current.findChild(QScrollArea)
+        if scroll_area is not None:
+            state["page"] = scroll_area.verticalScrollBar().value()
+        keyword_list = current.findChild(QListWidget, "keywordDetailList")
+        if keyword_list is not None:
+            state["keywords"] = keyword_list.verticalScrollBar().value()
+        return state
+
+    def _restore_detail_scroll_state(self, state: dict[str, int]) -> None:
+        if not state:
+            return
+        # Scrollbar ranges aren't final until the new page has actually been
+        # laid out, so defer the restore to the next event loop turn.
+        QTimer.singleShot(0, lambda: self._apply_detail_scroll_state(state))
+
+    def _apply_detail_scroll_state(self, state: dict[str, int]) -> None:
+        current = self.detail.currentWidget()
+        if current is None:
+            return
+        if "page" in state:
+            scroll_area = current.findChild(QScrollArea)
+            if scroll_area is not None:
+                scroll_area.verticalScrollBar().setValue(state["page"])
+        if "keywords" in state:
+            keyword_list = current.findChild(QListWidget, "keywordDetailList")
+            if keyword_list is not None:
+                keyword_list.verticalScrollBar().setValue(state["keywords"])
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.ui_settings.setValue("ui/main_window_geometry", self.saveGeometry())

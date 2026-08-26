@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from send2trash import send2trash
+
 WINDOWS_RESERVED = {
     "CON",
     "PRN",
@@ -27,3 +29,26 @@ def open_in_explorer(path: Path) -> None:
     import os
 
     os.startfile(str(path.resolve()))  # type: ignore[attr-defined]
+
+
+def reveal_in_explorer(path: Path) -> None:
+    """Open Windows Explorer with `path` selected, rather than launching it."""
+    import subprocess
+
+    subprocess.run(["explorer", f"/select,{path.resolve()}"], check=False)
+
+
+def delete_directory(path: Path) -> None:
+    """Send a directory to the Windows Recycle Bin rather than permanently
+    deleting it, so an accidental export delete is always recoverable from
+    the Recycle Bin. A no-op if it's already gone (e.g. the user deleted it
+    manually, or it never existed)."""
+    if path.exists():
+        send2trash(str(path.resolve()))
+
+
+def directory_size(path: Path) -> int:
+    """Total size in bytes of every file under `path`, or 0 if it's missing."""
+    if not path.exists():
+        return 0
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
