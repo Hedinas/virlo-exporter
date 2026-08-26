@@ -359,6 +359,41 @@ class ToggleRow(QFrame):
         self.toggled.emit(checked)
 
 
+class SectionHeader(QFrame):
+    """The whole header row is the toggle target -- no separate chevron
+    button. An optional action (e.g. "+ New Agent") sits in the same row
+    but consumes its own click before it can bubble up, so it never
+    triggers collapse/expand."""
+
+    clicked = Signal()
+
+    def __init__(self, title: str, action: QPushButton | None = None) -> None:
+        super().__init__()
+        self.setObjectName("sidebarSectionHeader")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._title = title.upper()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 7, 4, 7)
+        layout.setSpacing(6)
+        self.title_label = QLabel()
+        self.title_label.setObjectName("sectionHeading")
+        layout.addWidget(self.title_label)
+        layout.addStretch()
+        if action:
+            action.setObjectName("toolbarAction")
+            layout.addWidget(action)
+        self.set_expanded(True)
+
+    def set_expanded(self, expanded: bool) -> None:
+        chevron = "▾" if expanded else "▸"
+        self.title_label.setText(f"{self._title}  {chevron}")
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class CollapsibleSection(QFrame):
     expandedChanged = Signal(bool)
 
@@ -367,38 +402,24 @@ class CollapsibleSection(QFrame):
         self.setObjectName("sidebarSection")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(7)
-        header = QHBoxLayout()
-        header.setSpacing(5)
-        self.chevron = QToolButton()
-        self.chevron.setObjectName("chevron")
-        self.chevron.setCheckable(True)
-        self.chevron.setChecked(True)
-        self.chevron.clicked.connect(self.set_expanded)
-        title_button = QToolButton()
-        title_button.setObjectName("sectionTitle")
-        title_button.setText(title)
-        title_button.clicked.connect(lambda: self.set_expanded(not self.is_expanded()))
-        header.addWidget(self.chevron)
-        header.addWidget(title_button)
-        header.addStretch()
-        if action:
-            action.setObjectName("toolbarAction")
-            header.addWidget(action)
-        root.addLayout(header)
+        root.setSpacing(4)
+        self.header = SectionHeader(title, action)
+        self.header.clicked.connect(lambda: self.set_expanded(not self.is_expanded()))
+        root.addWidget(self.header)
         self.body = QWidget()
         self.body_layout = QVBoxLayout(self.body)
         self.body_layout.setContentsMargins(0, 0, 0, 0)
         self.body_layout.setSpacing(6)
         root.addWidget(self.body)
+        self._expanded = True
         self.set_expanded(True)
 
     def is_expanded(self) -> bool:
-        return self.body.isVisibleTo(self) if self.isVisible() else self.chevron.isChecked()
+        return self._expanded
 
     def set_expanded(self, expanded: bool) -> None:
-        self.chevron.setChecked(expanded)
-        self.chevron.setText("⌄" if expanded else "›")
+        self._expanded = expanded
+        self.header.set_expanded(expanded)
         self.body.setVisible(expanded)
         self.updateGeometry()
         # Hiding/showing the body can leave a stale cached sizeHint on this

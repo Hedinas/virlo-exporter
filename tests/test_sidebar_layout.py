@@ -70,12 +70,48 @@ def test_sidebar_collapse_state_persists_across_reconstruction(tmp_path, qapp) -
         qapp.setApplicationName(original_app)
 
 
-def test_natural_list_bounded_height_caps_active_processes(tmp_path, qapp) -> None:
+def test_active_processes_scroll_is_bounded_when_many_rows_exist(tmp_path, qapp) -> None:
     window = _make_window(tmp_path, qapp)
     for index in range(10):
         window.database.upsert_process(
             f"export:agent-{index}:run-1", "export", f"Export {index}", "running", {}
         )
     window._populate_processes()
-    # Ten rows would naturally be much taller than the configured cap.
-    assert window.process_list.height() <= 4 * 66 + 20
+    # The pinned panel is bounded by its outer scroll area, not by
+    # artificially capping the row list's own natural height.
+    assert window.process_scroll.maximumHeight() <= 4 * 66
+    assert window.process_list.count() == 10
+
+
+def test_agents_section_header_toggles_without_a_separate_chevron_button(tmp_path, qapp) -> None:
+    window = _make_window(tmp_path, qapp)
+    assert not hasattr(window.agents_section, "chevron")
+    before = window.agents_section.is_expanded()
+    window.agents_section.header.clicked.emit()
+    assert window.agents_section.is_expanded() != before
+    window.agents_section.header.clicked.emit()
+    assert window.agents_section.is_expanded() == before
+
+
+def test_global_research_list_includes_every_agents_runs(tmp_path, qapp) -> None:
+    window = _make_window(tmp_path, qapp)
+    for index in range(3):
+        window.database.cache_agent(
+            {
+                "id": f"agent-{index}",
+                "name": f"Agent {index}",
+                "intent": "x",
+                "keywords": [],
+                "platforms": ["tiktok"],
+                "is_recurring": False,
+            }
+        )
+        for run_index in range(5):
+            window.database.assign_runs(
+                f"agent-{index}",
+                [{"id": f"run-{index}-{run_index}", "started_at": "2026-08-24T20:42:58Z", "status": "completed"}],
+            )
+    window._load_cached_agents()
+    # 3 agents x 5 runs = 15 total; the old RECENT_RESEARCH_LIMIT (12) bug
+    # would have silently dropped 3 of them from the sidebar.
+    assert window.research_list.count() == 15

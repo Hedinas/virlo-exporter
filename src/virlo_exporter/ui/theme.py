@@ -168,14 +168,11 @@ QSplitter::handle:hover { background: #3B82F6; }
 QSplitter#mainSplitter::handle { background: #252B34; }
 QSplitter#mainSplitter::handle:hover { background: #3B82F6; }
 
-QToolButton#chevron, QToolButton#sectionTitle {
-    background: transparent; border: none; padding: 2px; color: #9CA3AF;
+QFrame#sidebarSectionHeader { background: transparent; border-radius: 6px; }
+QFrame#sidebarSectionHeader:hover { background: #171A20; }
+QLabel#sectionHeading {
+    font-size: 13px; font-weight: 700; letter-spacing: 0.5px; color: #E5E7EB;
 }
-QToolButton#chevron { font-size: 17px; min-width: 17px; max-width: 17px; }
-QToolButton#sectionTitle {
-    font-size: 11px; font-weight: 700; letter-spacing: 1px; text-align: left;
-}
-QToolButton#chevron:hover, QToolButton#sectionTitle:hover { color: #F3F4F6; background: transparent; }
 QToolButton#gearButton, QToolButton#pencilButton {
     background: transparent; border: none; color: #788291; font-size: 15px;
     min-width: 26px; max-width: 26px; padding: 4px;

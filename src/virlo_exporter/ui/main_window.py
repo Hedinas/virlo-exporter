@@ -63,8 +63,6 @@ from .logic import agent_display_status, research_search_text, run_timestamp
 
 logger = logging.getLogger(__name__)
 
-RECENT_RESEARCH_LIMIT = 12
-
 
 def human_date(value: str | None) -> str:
     if not value:
@@ -186,48 +184,103 @@ def metric_card(label_text: str, value_text: str) -> QFrame:
     return frame
 
 
-class NaturalListWidget(QListWidget):
-    def __init__(self, parent: QWidget | None = None, *, max_height: int | None = None) -> None:
+class RowList(QWidget):
+    """A QListWidget-like container backed by a plain QVBoxLayout of row
+    widgets instead of a QAbstractItemView. Its natural height is always
+    exactly "sum of visible rows' own sizeHint" -- there is no viewport,
+    no sizeHintForRow(), and nothing to resync after the fact. Bounding
+    the height (for the pinned Active Processes panel) is a plain
+    setMaximumHeight(), which triggers a real scrollbar via an outer
+    QScrollArea rather than a manually recomputed fixed height.
+    """
+
+    currentItemChanged = Signal(object, object)
+    itemClicked = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._max_height = max_height
-        self.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-            if max_height is None
-            else Qt.ScrollBarPolicy.ScrollBarAsNeeded
-        )
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setSpacing(2)
-        self.setMinimumHeight(34)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(4)
+        self._items: list[QListWidgetItem] = []
+        self._widgets: dict[int, QWidget] = {}
+        self._current: QListWidgetItem | None = None
 
     def sync_height(self) -> None:
-        height = 2 * self.frameWidth() + 6
-        for index in range(self.count()):
-            if not self.item(index).isHidden():
-                height += max(36, self.sizeHintForRow(index)) + self.spacing()
-        height = max(34, height)
-        if self._max_height is not None:
-            height = min(height, self._max_height)
-        self.setFixedHeight(height)
-        self.verticalScrollBar().setValue(0)
-        # sizeHintForRow() can return a stale/incorrect value the first time
-        # this runs, before the widget (or an ancestor CollapsibleSection)
-        # has ever been shown. Re-measure once the event loop settles so
-        # expand/collapse doesn't leave a wrong fixed height behind.
-        QTimer.singleShot(0, self._resync_once_shown)
+        """No-op kept for call-site compatibility; height is always natural."""
 
-    def _resync_once_shown(self) -> None:
-        height = 2 * self.frameWidth() + 6
-        for index in range(self.count()):
-            if not self.item(index).isHidden():
-                height += max(36, self.sizeHintForRow(index)) + self.spacing()
-        height = max(34, height)
-        if self._max_height is not None:
-            height = min(height, self._max_height)
-        if height != self.height():
-            self.setFixedHeight(height)
+    def clear(self) -> None:
+        for widget in self._widgets.values():
+            widget.deleteLater()
+        self._widgets.clear()
+        while self._layout.count():
+            taken = self._layout.takeAt(0)
+            widget = taken.widget()
+            if widget:
+                widget.deleteLater()
+        self._items = []
+        self._current = None
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def item(self, index: int) -> QListWidgetItem | None:
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def addItem(self, item: QListWidgetItem) -> None:
+        self._items.append(item)
+        label = QLabel(item.text())
+        label.setObjectName("muted")
+        label.setWordWrap(True)
+        self._widgets[id(item)] = label
+        self._layout.addWidget(label)
+
+    def setItemWidget(self, item: QListWidgetItem, widget: QWidget) -> None:
+        previous = self._widgets.get(id(item))
+        index = self._layout.indexOf(previous) if previous is not None else -1
+        if previous is not None:
+            self._layout.removeWidget(previous)
+            previous.deleteLater()
+        self._widgets[id(item)] = widget
+        if index >= 0:
+            self._layout.insertWidget(index, widget)
+        else:
+            self._layout.addWidget(widget)
+        if hasattr(widget, "clicked"):
+            widget.clicked.connect(lambda item=item: self._row_clicked(item))
+
+    def itemWidget(self, item: QListWidgetItem) -> QWidget | None:
+        return self._widgets.get(id(item))
+
+    def set_hidden(self, item: QListWidgetItem, hidden: bool) -> None:
+        item.setHidden(hidden)
+        widget = self._widgets.get(id(item))
+        if widget is not None:
+            widget.setVisible(not hidden)
+
+    def _row_clicked(self, item: QListWidgetItem) -> None:
+        self.setCurrentItem(item)
+        self.itemClicked.emit(item)
+
+    def setCurrentItem(self, item: QListWidgetItem | None) -> None:
+        previous = self._current
+        self._current = item
+        self.currentItemChanged.emit(item, previous)
+
+    def currentItem(self) -> QListWidgetItem | None:
+        return self._current
+
+    def itemAt(self, point: Any) -> QListWidgetItem | None:
+        for item in self._items:
+            widget = self._widgets.get(id(item))
+            if widget is not None and widget.geometry().contains(point):
+                return item
+        return None
 
 
 class AgentRow(QFrame):
+    clicked = Signal()
+
     def __init__(self, agent: Agent, status: str, on_edit: Any, on_rename: Any) -> None:
         super().__init__()
         self.setObjectName("sidebarRow")
@@ -239,11 +292,12 @@ class AgentRow(QFrame):
         text.setSpacing(1)
         name = QLabel(agent.name)
         name.setObjectName("rowTitle")
-        name.setToolTip(agent.name)
+        name.setWordWrap(True)
         secondary = QLabel(
             f"{'Recurring' if agent.is_recurring else 'One-time'} · {status}"
         )
         secondary.setObjectName("muted")
+        secondary.setWordWrap(True)
         text.addWidget(name)
         text.addWidget(secondary)
         pencil = QToolButton()
@@ -257,17 +311,26 @@ class AgentRow(QFrame):
         gear.setToolTip(f"Edit {agent.name}")
         gear.clicked.connect(on_edit)
         layout.addLayout(text, 1)
-        layout.addWidget(pencil)
-        layout.addWidget(gear)
+        layout.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(gear, 0, Qt.AlignmentFlag.AlignTop)
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
 
 class ResearchRow(QFrame):
-    def __init__(self, title_text: str, secondary_text: str, on_rename: Any) -> None:
+    clicked = Signal()
+
+    def __init__(
+        self, title_text: str, agent_name: str, date_text: str, on_rename: Any
+    ) -> None:
         super().__init__()
         self.setObjectName("sidebarRow")
         self.setProperty("selected", False)
@@ -278,26 +341,38 @@ class ResearchRow(QFrame):
         text.setSpacing(1)
         title = QLabel(title_text)
         title.setObjectName("rowTitle")
-        title.setToolTip(title_text)
-        secondary = QLabel(secondary_text)
-        secondary.setObjectName("muted")
+        title.setWordWrap(True)
+        agent_label = QLabel(agent_name)
+        agent_label.setObjectName("muted")
+        agent_label.setWordWrap(True)
+        date_label = QLabel(date_text)
+        date_label.setObjectName("muted")
+        date_label.setWordWrap(True)
         text.addWidget(title)
-        text.addWidget(secondary)
+        text.addWidget(agent_label)
+        text.addWidget(date_label)
         pencil = QToolButton()
         pencil.setObjectName("pencilButton")
         pencil.setText("✎")
         pencil.setToolTip("Rename research")
         pencil.clicked.connect(on_rename)
         layout.addLayout(text, 1)
-        layout.addWidget(pencil)
+        layout.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
 
 class ProcessRow(QFrame):
+    clicked = Signal()
+
     def __init__(self, title_text: str, secondary_text: str) -> None:
         super().__init__()
         self.setObjectName("sidebarRow")
@@ -307,9 +382,10 @@ class ProcessRow(QFrame):
         layout.setSpacing(1)
         title = QLabel(f"● {title_text}")
         title.setObjectName("rowTitle")
-        title.setToolTip(title_text)
+        title.setWordWrap(True)
         secondary = QLabel(secondary_text)
         secondary.setObjectName("muted")
+        secondary.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(secondary)
 
@@ -317,6 +393,11 @@ class ProcessRow(QFrame):
         self.setProperty("selected", selected)
         self.style().unpolish(self)
         self.style().polish(self)
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -418,7 +499,7 @@ class MainWindow(QMainWindow):
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search agents…")
         self.search.textChanged.connect(self._filter_agents)
-        self.agent_list = NaturalListWidget()
+        self.agent_list = RowList()
         self.agent_list.setObjectName("agentSidebarList")
         self.agent_list.currentItemChanged.connect(self._agent_selected)
         self.agent_list.itemClicked.connect(lambda _item: self._sync_agent_row_selection())
@@ -434,16 +515,11 @@ class MainWindow(QMainWindow):
         self.research_search = QLineEdit()
         self.research_search.setPlaceholderText("Search research…")
         self.research_search.textChanged.connect(self._filter_research)
-        self.research_list = NaturalListWidget()
+        self.research_list = RowList()
         self.research_list.setObjectName("researchSidebarList")
         self.research_list.itemClicked.connect(self._research_selected)
-        self.view_all_research = QPushButton("View all")
-        self.view_all_research.setObjectName("linkButton")
-        self.view_all_research.clicked.connect(self.show_all_research)
-        self.view_all_research.hide()
         self.research_section.body_layout.addWidget(self.research_search)
         self.research_section.body_layout.addWidget(self.research_list)
-        self.research_section.body_layout.addWidget(self.view_all_research)
         side.addWidget(self.research_section)
 
         side.addStretch()
@@ -456,10 +532,17 @@ class MainWindow(QMainWindow):
         processes_layout.setContentsMargins(4, 10, 5, 4)
         processes_layout.setSpacing(6)
         processes_layout.addWidget(section_label("Active Processes"))
-        self.process_list = NaturalListWidget(max_height=4 * 66)
+        self.process_scroll = QScrollArea()
+        process_scroll = self.process_scroll
+        process_scroll.setObjectName("processesScroll")
+        process_scroll.setWidgetResizable(True)
+        process_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        process_scroll.setMaximumHeight(4 * 66)
+        self.process_list = RowList()
         self.process_list.setObjectName("processSidebarList")
         self.process_list.itemClicked.connect(self._process_selected)
-        processes_layout.addWidget(self.process_list)
+        process_scroll.setWidget(self.process_list)
+        processes_layout.addWidget(process_scroll)
         sidebar_layout.addWidget(processes_panel, 0)
         self.main_splitter.addWidget(sidebar)
 
@@ -709,7 +792,7 @@ class MainWindow(QMainWindow):
             item = self.agent_list.item(index)
             agent_id = item.data(Qt.ItemDataRole.UserRole)
             agent = self.agents.get(str(agent_id))
-            item.setHidden(bool(agent) and query not in agent.name.casefold())
+            self.agent_list.set_hidden(item, bool(agent) and query not in agent.name.casefold())
         self.agent_list.sync_height()
 
     def _sync_agent_row_selection(self) -> None:
@@ -793,24 +876,21 @@ class MainWindow(QMainWindow):
         current = self.research_list.currentItem()
         current_key = current.data(Qt.ItemDataRole.UserRole) if current else None
         self.research_list.clear()
+        # Global Research must include every known run across every Agent --
+        # not a "recent" subset -- so it always matches what's visible per-Agent.
         research = self._all_research()
-        for agent, run in research[:RECENT_RESEARCH_LIMIT]:
+        for agent, run in research:
             number = run.local_number or 0
             display_name = self.database.research_display_name(agent.id, run.id)
-            if display_name:
-                title = display_name
-                secondary = f"Research #{number:03d} · {agent.name} · {compact_date(run_timestamp(run))}"
-            else:
-                title = f"Research #{number:03d}"
-                secondary = f"{agent.name} · {compact_date(run_timestamp(run))}"
+            title = display_name or f"Research #{number:03d}"
             key = {"agent_id": agent.id, "run_id": run.id}
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, key)
             item.setData(Qt.ItemDataRole.UserRole + 1, research_search_text(agent.name, run, display_name))
-            item.setSizeHint(QSize(220, 62))
             row = ResearchRow(
                 title,
-                secondary,
+                agent.name,
+                compact_date(run_timestamp(run)),
                 lambda _=False, a=agent, r=run: self.rename_research(a, r),
             )
             self.research_list.addItem(item)
@@ -820,9 +900,7 @@ class MainWindow(QMainWindow):
         if not research:
             item = QListWidgetItem("No research runs yet")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
-            item.setSizeHint(QSize(220, 36))
             self.research_list.addItem(item)
-        self.view_all_research.setVisible(len(research) > RECENT_RESEARCH_LIMIT)
         self._filter_research(self.research_search.text())
         self.research_list.sync_height()
         self._sync_research_row_selection()
@@ -834,7 +912,7 @@ class MainWindow(QMainWindow):
             haystack = item.data(Qt.ItemDataRole.UserRole + 1)
             if haystack is None:
                 continue
-            item.setHidden(bool(query) and query not in haystack)
+            self.research_list.set_hidden(item, bool(query) and query not in haystack)
         self.research_list.sync_height()
 
     def _sync_research_row_selection(self) -> None:
@@ -1423,25 +1501,6 @@ class MainWindow(QMainWindow):
             layout.addWidget(muted("No local exports yet."))
         for item in history:
             layout.addWidget(self._export_card(agent, run, item))
-        layout.addStretch()
-        scroll.setWidget(body)
-        root.addWidget(scroll)
-        self._show_page(page)
-
-    def show_all_research(self) -> None:
-        page = QWidget()
-        root = QVBoxLayout(page)
-        root.setContentsMargins(28, 24, 28, 24)
-        title = QLabel("All Research")
-        title.setObjectName("title")
-        root.addWidget(title)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        body = QWidget()
-        layout = QVBoxLayout(body)
-        for agent, run in self._all_research():
-            layout.addWidget(self._run_card(agent, run))
         layout.addStretch()
         scroll.setWidget(body)
         root.addWidget(scroll)
