@@ -7,13 +7,12 @@ from pathlib import Path
 from threading import Event
 from typing import Any
 
-from PySide6.QtCore import QSettings, QSize, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -154,6 +153,27 @@ def mini_card(label_text: str, value_text: str, state: str = "neutral") -> QFram
     return frame
 
 
+def icon_action_button(icon_text: str, tooltip: str, callback: Any) -> QToolButton:
+    button = QToolButton()
+    button.setObjectName("iconAction")
+    button.setText(icon_text)
+    button.setToolTip(tooltip)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.clicked.connect(callback)
+    return button
+
+
+def icon_toolbar(actions: Any) -> QHBoxLayout:
+    """A row of small centered icon buttons (icon_text, tooltip, callback)
+    replacing the old three-dot overflow menu -- every action is visible
+    and reachable in one click, with a tooltip standing in for a label."""
+    row = QHBoxLayout()
+    row.setSpacing(4)
+    for icon_text, tooltip, callback in actions:
+        row.addWidget(icon_action_button(icon_text, tooltip, callback))
+    return row
+
+
 def status_badge(text: str, state: str = "neutral") -> QLabel:
     label = QLabel(text.upper())
     label.setObjectName("statusBadge")
@@ -175,10 +195,15 @@ class ClickableStatusBadge(QLabel):
         super().mousePressEvent(event)
 
 
-class ExportCompletionDialog(QDialog):
-    """Compact, centered completion notice -- not the old full-page
-    inline summary. Closing it (the top-right x, or Escape) always
-    returns to the Research Detail it was launched from."""
+class ExportCompletionOverlay(QWidget):
+    """A single in-window centered overlay, not a separate top-level QDialog
+    -- a real QDialog carries its own OS window-chrome close button in
+    addition to any custom one drawn inside it, which is exactly what caused
+    the reported "two X buttons" bug. As a plain child QWidget this has no
+    window chrome at all: the only way to dismiss it is the one custom ×
+    button or Escape, both wired to the same close_and_notify()."""
+
+    closed = Signal()
 
     def __init__(
         self,
@@ -188,14 +213,21 @@ class ExportCompletionDialog(QDialog):
         stats: dict[str, Any],
         warning_count: int,
         folder_path: Path,
-        parent: QWidget | None = None,
+        parent: QWidget,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Export complete" if state != "failed" else "Export failed")
-        self.setFixedWidth(560)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
+        self.setObjectName("completionBackdrop")
+        self.setAutoFillBackground(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        card = QFrame()
+        card.setObjectName("completionCard")
+        card.setFixedWidth(560)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
 
         top = QHBoxLayout()
         icon = "✓" if state == "completed" else "⚠" if state == "warning" else "✕"
@@ -205,35 +237,39 @@ class ExportCompletionDialog(QDialog):
             "failed": "EXPORT FAILED",
         }.get(state, "EXPORT COMPLETE")
         title = QLabel(f"{icon} {status_text}")
-        title.setObjectName("title")
+        title.setObjectName("completionTitle")
         top.addWidget(title)
         top.addStretch()
         close_button = QToolButton()
         close_button.setObjectName("modalCloseButton")
         close_button.setText("×")
-        close_button.clicked.connect(self.reject)
+        close_button.clicked.connect(self.close_and_notify)
         top.addWidget(close_button)
         layout.addLayout(top)
 
         minutes, seconds = divmod(max(0, duration_seconds), 60)
-        layout.addWidget(muted(f"{minutes}m {seconds:02d}s"))
+        duration_label = muted(f"{minutes}m {seconds:02d}s")
+        duration_label.setObjectName("completionDuration")
+        layout.addWidget(duration_label)
 
-        metrics_row1 = QHBoxLayout()
-        metrics_row1.setSpacing(10)
-        metrics_row1.addWidget(metric_card("RAW Data", format_bytes(stats.get("raw_bytes"))))
-        metrics_row1.addWidget(metric_card("AI Dataset", format_bytes(stats.get("dataset_bytes"))))
-        layout.addLayout(metrics_row1)
-
-        metrics_row2 = QHBoxLayout()
-        metrics_row2.setSpacing(10)
-        for label_text, value in (
-            ("Videos", stats.get("videos", 0)),
-            ("High Signal", stats.get("high_signal", 0)),
-            ("Baseline", stats.get("baseline", 0)),
-            ("Warnings", warning_count),
-        ):
-            metrics_row2.addWidget(metric_card(label_text, f"{value:,}"))
-        layout.addLayout(metrics_row2)
+        metrics = [
+            (label_text, value)
+            for label_text, value in (
+                ("RAW Data", format_bytes(stats.get("raw_bytes"))),
+                ("AI Dataset", format_bytes(stats.get("dataset_bytes"))),
+                ("Videos", f"{stats.get('videos', 0):,}"),
+                ("High Signal", f"{stats.get('high_signal', 0):,}"),
+                ("Baseline", f"{stats.get('baseline', 0):,}"),
+                ("Warnings", f"{warning_count:,}"),
+            )
+            if value not in (None, "—", "0 B", "0")
+        ]
+        metrics_flow = FlowLayout(spacing=10)
+        metrics_host = QWidget()
+        metrics_host.setLayout(metrics_flow)
+        for label_text, value in metrics:
+            metrics_flow.addWidget(metric_card(label_text, value))
+        layout.addWidget(metrics_host)
 
         actions = QHBoxLayout()
         open_button = QPushButton("Open Folder")
@@ -243,13 +279,43 @@ class ExportCompletionDialog(QDialog):
         actions.addStretch()
         layout.addLayout(actions)
 
-    def center_over(self, widget: QWidget) -> None:
-        self.adjustSize()
-        center = widget.geometry().center() if widget.isVisible() else widget.rect().center()
-        global_center = widget.mapToGlobal(widget.rect().center()) if widget.isVisible() else center
-        frame = self.frameGeometry()
-        frame.moveCenter(global_center)
-        self.move(frame.topLeft())
+        outer.addStretch()
+        center_row = QHBoxLayout()
+        center_row.addStretch()
+        center_row.addWidget(card)
+        center_row.addStretch()
+        outer.addLayout(center_row)
+        outer.addStretch()
+
+        parent.installEventFilter(self)
+        self.setGeometry(parent.rect())
+
+    def show_over_parent(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.show()
+        self.raise_()
+        self.setFocus()
+
+    def close_and_notify(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            parent.removeEventFilter(self)
+        self.hide()
+        self.deleteLater()
+        self.closed.emit()
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.close_and_notify()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:
+        if watched is self.parentWidget() and event.type() == QEvent.Type.Resize:
+            self.setGeometry(watched.rect())
+        return super().eventFilter(watched, event)
 
 
 RUN_STATUS_STATE = {
@@ -1186,22 +1252,20 @@ class MainWindow(QMainWindow):
             muted(f"Last Research: {human_date(run_timestamp(latest) if latest else agent.last_run_at)}")
         )
         header.addLayout(title_box, 1)
-        more = QToolButton()
-        more.setText("•••")
-        more.setToolTip("More Agent actions")
-        more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        menu = QMenu(more)
-        rename_action = QAction("Rename Agent", menu)
-        rename_action.triggered.connect(lambda: self.quick_rename_agent(agent))
-        menu.addAction(rename_action)
-        copy_id = QAction("Copy Agent ID", menu)
-        copy_id.triggered.connect(lambda: QApplication.clipboard().setText(agent.id))
-        menu.addAction(copy_id)
-        open_folder = QAction("Open Export Folder", menu)
-        open_folder.triggered.connect(lambda: open_in_explorer(Path(self.settings.export_folder)))
-        menu.addAction(open_folder)
-        more.setMenu(menu)
-        header.addWidget(more)
+        header.addLayout(
+            icon_toolbar(
+                (
+                    ("✎", f"Rename {agent.name}", lambda: self.quick_rename_agent(agent)),
+                    ("⚙", "Edit agent settings", lambda: self.edit_agent(agent)),
+                    ("⧉", "Copy Agent ID", lambda: QApplication.clipboard().setText(agent.id)),
+                    (
+                        "📁",
+                        "Open Export Folder",
+                        lambda: open_in_explorer(Path(self.settings.export_folder)),
+                    ),
+                )
+            )
+        )
         layout.addLayout(header)
 
         overview, overview_layout = card()
@@ -1234,10 +1298,7 @@ class MainWindow(QMainWindow):
         platform_host = QWidget()
         platform_host.setLayout(platform_row)
         left_layout.addWidget(platform_host)
-        grid = QGridLayout()
-        grid.setSpacing(8)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
+        grid = FlowLayout(spacing=8)
         di_enabled = agent.data_intelligence_enabled
         params = [
             ("Language", "English only" if agent.english_only else "All languages", "neutral"),
@@ -1255,8 +1316,8 @@ class MainWindow(QMainWindow):
                 "neutral",
             ),
         ]
-        for index, (label_text, value_text, state) in enumerate(params):
-            grid.addWidget(mini_card(label_text, value_text, state), index // 2, index % 2)
+        for label_text, value_text, state in params:
+            grid.addWidget(mini_card(label_text, value_text, state))
         grid_host = QWidget()
         grid_host.setLayout(grid)
         left_layout.addWidget(grid_host)
@@ -1264,10 +1325,7 @@ class MainWindow(QMainWindow):
         new_research = QPushButton("New Research")
         new_research.setObjectName("primary")
         new_research.clicked.connect(lambda: self.show_new_research(agent.id))
-        edit = QPushButton("Edit Agent")
-        edit.clicked.connect(lambda: self.edit_agent(agent))
         actions.addWidget(new_research)
-        actions.addWidget(edit)
         if agent.is_recurring:
             toggle = QPushButton("Pause" if agent.active else "Resume")
             toggle.clicked.connect(lambda: self.toggle_agent(agent))
@@ -1354,7 +1412,7 @@ class MainWindow(QMainWindow):
         open_button.clicked.connect(lambda: self.show_run(agent, run))
         actions.addWidget(open_button)
         actions.addStretch()
-        export = QPushButton("Export for AI")
+        export = QPushButton("Export")
         export.setObjectName("primary")
         export.setEnabled(run.status in {"completed", "partial_failure"})
         export.clicked.connect(lambda: self.start_export(agent, run))
@@ -1416,23 +1474,23 @@ class MainWindow(QMainWindow):
         """Isolated so tests can stub the modal confirmation without
         blocking on a real QMessageBox event loop."""
         message = (
-            f"This will permanently delete all local files for this export.\n\n"
+            f"This will move this export's local files to the Recycle Bin.\n\n"
             f"Files: ~{size_text}\n\n"
             f"Research #{research_number:03d} and Virlo data will NOT be deleted.\n\n"
-            "This cannot be undone."
+            "You can restore it from the Recycle Bin afterward if needed."
         )
         confirm = QMessageBox(self)
         confirm.setIcon(QMessageBox.Icon.Warning)
-        confirm.setWindowTitle(f"Permanently delete Export #{number:03d}?")
-        confirm.setText(f"PERMANENTLY DELETE EXPORT #{number:03d}?")
+        confirm.setWindowTitle(f"Delete Export #{number:03d}?")
+        confirm.setText(f"MOVE EXPORT #{number:03d} TO RECYCLE BIN?")
         confirm.setInformativeText(message)
-        delete_button = confirm.addButton("Delete Permanently", QMessageBox.ButtonRole.DestructiveRole)
+        delete_button = confirm.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
         confirm.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
         confirm.setDefaultButton(delete_button)
         confirm.exec()
         return confirm.clickedButton() is delete_button
 
-    def delete_export_permanently(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
+    def delete_export_to_recycle_bin(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
         if str(export_record["status"]) == "running":
             QMessageBox.information(
                 self, "Export is running", "Cancel the export first, then delete it once it has stopped."
@@ -1476,19 +1534,27 @@ class MainWindow(QMainWindow):
 
         if files_missing:
             layout.addWidget(muted("Files missing — this export's local folder no longer exists."))
-            actions = QHBoxLayout()
-            view_button = QPushButton("View Process")
-            view_button.clicked.connect(
-                lambda _=False, record=export_record: self.open_export_history(agent, run, record)
+            actions = icon_toolbar(
+                (
+                    (
+                        "▶",
+                        "View process",
+                        lambda _=False, record=export_record: self.open_export_history(
+                            agent, run, record
+                        ),
+                    ),
+                )
             )
-            actions.addWidget(view_button)
             actions.addStretch()
-            delete_button = QPushButton("Delete")
-            delete_button.setObjectName("danger")
-            delete_button.clicked.connect(
-                lambda _=False, record=export_record: self.delete_export_permanently(agent, run, record)
+            actions.addWidget(
+                icon_action_button(
+                    "🗑",
+                    "Delete (moves to Recycle Bin)",
+                    lambda _=False, record=export_record: self.delete_export_to_recycle_bin(
+                        agent, run, record
+                    ),
+                )
             )
-            actions.addWidget(delete_button)
             layout.addLayout(actions)
             return frame
 
@@ -1512,29 +1578,39 @@ class MainWindow(QMainWindow):
                 metrics_row.addWidget(metric_card(label_text, value_text))
             layout.addWidget(metrics_host)
 
-        actions = QHBoxLayout()
-        view_button = QPushButton("View Process")
-        view_button.clicked.connect(
-            lambda _=False, record=export_record: self.open_export_history(agent, run, record)
+        actions = icon_toolbar(
+            (
+                (
+                    "▶",
+                    "View process",
+                    lambda _=False, record=export_record: self.open_export_history(
+                        agent, run, record
+                    ),
+                ),
+                (
+                    "📁",
+                    "Open folder",
+                    lambda _=False, path=export_record["path"]: open_in_explorer(Path(path)),
+                ),
+                (
+                    "📄",
+                    "Open report",
+                    lambda _=False, record=export_record: self.open_export_report(
+                        agent, run, record
+                    ),
+                ),
+            )
         )
-        actions.addWidget(view_button)
-        open_button = QPushButton("Open Folder")
-        open_button.clicked.connect(
-            lambda _=False, path=export_record["path"]: open_in_explorer(Path(path))
-        )
-        actions.addWidget(open_button)
-        report_button = QPushButton("Report")
-        report_button.clicked.connect(
-            lambda _=False, record=export_record: self.open_export_report(agent, run, record)
-        )
-        actions.addWidget(report_button)
         actions.addStretch()
-        delete_button = QPushButton("Delete")
-        delete_button.setObjectName("danger")
-        delete_button.clicked.connect(
-            lambda _=False, record=export_record: self.delete_export_permanently(agent, run, record)
+        actions.addWidget(
+            icon_action_button(
+                "🗑",
+                "Delete (moves to Recycle Bin)",
+                lambda _=False, record=export_record: self.delete_export_to_recycle_bin(
+                    agent, run, record
+                ),
+            )
         )
-        actions.addWidget(delete_button)
         layout.addLayout(actions)
         return frame
 
@@ -1562,12 +1638,28 @@ class MainWindow(QMainWindow):
         title = QLabel(display_name or f"Research #{number:03d}")
         title.setObjectName("title")
         title_row.addWidget(title)
-        rename_button = QToolButton()
-        rename_button.setObjectName("pencilButton")
-        rename_button.setText("✎")
-        rename_button.setToolTip("Rename research")
-        rename_button.clicked.connect(lambda: self.rename_research(agent, run))
-        title_row.addWidget(rename_button)
+        title_row.addLayout(
+            icon_toolbar(
+                (
+                    ("✎", "Rename research", lambda: self.rename_research(agent, run)),
+                    (
+                        "⧉",
+                        "Copy Run ID",
+                        lambda: QApplication.clipboard().setText(run.id),
+                    ),
+                    (
+                        "📁",
+                        "Open Export Folder",
+                        lambda: open_in_explorer(Path(self.settings.export_folder)),
+                    ),
+                    (
+                        "🗑",
+                        "Hide from Virlo Exporter (local only)",
+                        lambda: self.hide_research_locally(agent, run),
+                    ),
+                )
+            )
+        )
         title_row.addStretch()
         status_state = RUN_STATUS_STATE.get(run.status.casefold(), "neutral")
         title_row.addWidget(status_badge(run.status.replace("_", " "), status_state))
@@ -1607,10 +1699,7 @@ class MainWindow(QMainWindow):
             total_seconds = int(run.execution_time_ms / 1000)
             minutes, seconds = divmod(total_seconds, 60)
             duration = f"{minutes}m {seconds:02d}s"
-        run_info_grid = QGridLayout()
-        run_info_grid.setSpacing(8)
-        run_info_grid.setColumnStretch(0, 1)
-        run_info_grid.setColumnStretch(1, 1)
+        run_info_grid = FlowLayout(spacing=8)
         run_info_fields = [
             ("Started", compact_date(run.started_at)),
             ("Completed", compact_date(run.completed_at)),
@@ -1619,8 +1708,8 @@ class MainWindow(QMainWindow):
             ("Status", run.status.replace("_", " ").title()),
             ("Cadence", agent.cadence or "—"),
         ]
-        for index, (field_label, field_value) in enumerate(run_info_fields):
-            run_info_grid.addWidget(mini_card(field_label, field_value), index // 2, index % 2)
+        for field_label, field_value in run_info_fields:
+            run_info_grid.addWidget(mini_card(field_label, field_value))
         run_info_grid_host = QWidget()
         run_info_grid_host.setLayout(run_info_grid)
         run_info_layout.addWidget(run_info_grid_host)
@@ -1640,10 +1729,7 @@ class MainWindow(QMainWindow):
         analysis_data = agent.raw.get("analysis_data")
         analysis_ready = bool(analysis_data)
         theme_count = len(analysis_data.get("themes", [])) if isinstance(analysis_data, dict) else 0
-        intelligence_grid = QGridLayout()
-        intelligence_grid.setSpacing(8)
-        intelligence_grid.setColumnStretch(0, 1)
-        intelligence_grid.setColumnStretch(1, 1)
+        intelligence_grid = FlowLayout(spacing=8)
         intelligence_fields = [
             (
                 "Data Intelligence",
@@ -1666,16 +1752,14 @@ class MainWindow(QMainWindow):
                 "on" if agent.data_intelligence_enabled else "off",
             ),
         ]
-        for index, (field_label, field_value, field_state) in enumerate(intelligence_fields):
-            intelligence_grid.addWidget(
-                mini_card(field_label, field_value, field_state), index // 2, index % 2
-            )
+        for field_label, field_value, field_state in intelligence_fields:
+            intelligence_grid.addWidget(mini_card(field_label, field_value, field_state))
         intelligence_grid_host = QWidget()
         intelligence_grid_host.setLayout(intelligence_grid)
         intelligence_layout.addWidget(intelligence_grid_host)
         layout.addWidget(intelligence)
 
-        export = QPushButton("Export for AI")
+        export = QPushButton("Export")
         export.setObjectName("primary")
         export.setMinimumHeight(44)
         export.setEnabled(run.status in {"completed", "partial_failure"})
@@ -1825,6 +1909,26 @@ class MainWindow(QMainWindow):
         self._populate_research()
         if self._current_page[:1] == ("run",) and self._current_page[1:] == (agent.id, run.id):
             self.show_run(agent, run)
+
+    def _confirm_hide_research(self, agent: Agent, run: Run) -> bool:
+        answer = QMessageBox.warning(
+            self,
+            "Hide Research",
+            "This removes the research from Virlo Exporter's lists only -- there is no Virlo "
+            "API endpoint to delete a Run, so nothing is removed from your Virlo account. Any "
+            "exports already saved to disk are kept and can still be opened from their folder.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def hide_research_locally(self, agent: Agent, run: Run) -> None:
+        if not self._confirm_hide_research(agent, run):
+            return
+        self.database.hide_research(agent.id, run.id)
+        self.runs[agent.id] = [value for value in self.runs.get(agent.id, []) if value.id != run.id]
+        self._populate_research()
+        self.show_agent(agent.id)
 
     def edit_agent(self, agent: Agent) -> None:
         if not self.client:
@@ -2014,20 +2118,19 @@ class MainWindow(QMainWindow):
             )
         if self.settings.open_folder_after_export:
             open_in_explorer(result.path)
-        dialog = ExportCompletionDialog(
+        overlay = ExportCompletionOverlay(
             state=state,
             duration_seconds=duration_seconds,
             stats=result.statistics,
             warning_count=warning_count,
             folder_path=result.path,
-            parent=self,
+            parent=self.centralWidget(),
         )
-        dialog.center_over(self)
-        dialog.exec()
-        # Closing the completion modal always returns to this export's own
+        # Closing the completion overlay always returns to this export's own
         # Research Detail, regardless of what page happened to be open when
         # the export actually finished in the background.
-        self.show_run(agent, run)
+        overlay.closed.connect(lambda: self.show_run(agent, run))
+        overlay.show_over_parent()
 
     def _export_failed(
         self, process_id: str, error: Exception | str, details: str

@@ -178,11 +178,19 @@ QToolButton#modalCloseButton {
     min-width: 28px; max-width: 28px; padding: 0px;
 }
 QToolButton#modalCloseButton:hover { color: #F3F4F6; background: #232832; border-radius: 6px; }
-QToolButton#gearButton, QToolButton#pencilButton {
-    background: transparent; border: none; color: #788291; font-size: 15px;
-    min-width: 26px; max-width: 26px; padding: 4px;
+QWidget#completionBackdrop { background: rgba(6, 8, 11, 0.72); }
+QFrame#completionCard {
+    background: #14171D; border: 1px solid #2A303A; border-radius: 14px;
 }
-QToolButton#gearButton:hover, QToolButton#pencilButton:hover { color: #DCE9FF; background: #29364A; }
+QLabel#completionTitle { font-size: 20px; font-weight: 700; color: #F3F4F6; }
+QLabel#completionDuration { font-size: 15px; color: #9CA3AF; }
+QToolButton#gearButton, QToolButton#pencilButton, QToolButton#iconAction {
+    background: transparent; border: none; color: #788291; font-size: 15px;
+    min-width: 26px; max-width: 26px; min-height: 26px; max-height: 26px; padding: 4px;
+}
+QToolButton#gearButton:hover, QToolButton#pencilButton:hover, QToolButton#iconAction:hover {
+    color: #DCE9FF; background: #29364A; border-radius: 6px;
+}
 QToolButton#platformPill {
     background: #171A20; color: #B7BEC9; border: 1px solid #465163;
     border-radius: 15px; padding: 7px 14px;

@@ -68,7 +68,7 @@ def test_delete_export_removes_stage_history(tmp_path) -> None:
     assert db.export_stages(export_id) == []
 
 
-def test_directory_size_and_delete_directory(tmp_path) -> None:
+def test_directory_size(tmp_path) -> None:
     target = tmp_path / "export_dir"
     target.mkdir()
     (target / "a.json").write_text("x" * 10, encoding="utf-8")
@@ -78,7 +78,28 @@ def test_directory_size_and_delete_directory(tmp_path) -> None:
     assert directory_size(target) == 15
     assert directory_size(tmp_path / "does-not-exist") == 0
 
+
+def test_delete_directory_sends_to_recycle_bin_not_permanent(tmp_path, monkeypatch) -> None:
+    # Must never call shutil.rmtree -- a deleted export should be recoverable
+    # from the Windows Recycle Bin, not gone forever. Mocked so the test
+    # suite never touches the real Recycle Bin.
+    target = tmp_path / "export_dir"
+    target.mkdir()
+    (target / "a.json").write_text("x", encoding="utf-8")
+
+    sent: list[str] = []
+    monkeypatch.setattr("virlo_exporter.utils.files.send2trash", sent.append)
+
     delete_directory(target)
 
-    assert not target.exists()
-    delete_directory(target)  # deleting again is a no-op, not an error
+    assert sent == [str(target.resolve())]
+    assert target.exists()  # the mock didn't actually move anything
+
+
+def test_delete_directory_missing_path_is_a_noop(tmp_path, monkeypatch) -> None:
+    sent: list[str] = []
+    monkeypatch.setattr("virlo_exporter.utils.files.send2trash", sent.append)
+
+    delete_directory(tmp_path / "does-not-exist")
+
+    assert sent == []

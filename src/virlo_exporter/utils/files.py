@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from send2trash import send2trash
+
 WINDOWS_RESERVED = {
     "CON",
     "PRN",
@@ -37,12 +39,12 @@ def reveal_in_explorer(path: Path) -> None:
 
 
 def delete_directory(path: Path) -> None:
-    """Recursively and permanently delete a directory. A no-op if it's
-    already gone (e.g. the user deleted it manually, or it never existed)."""
-    import shutil
-
+    """Send a directory to the Windows Recycle Bin rather than permanently
+    deleting it, so an accidental export delete is always recoverable from
+    the Recycle Bin. A no-op if it's already gone (e.g. the user deleted it
+    manually, or it never existed)."""
     if path.exists():
-        shutil.rmtree(path)
+        send2trash(str(path.resolve()))
 
 
 def directory_size(path: Path) -> int:

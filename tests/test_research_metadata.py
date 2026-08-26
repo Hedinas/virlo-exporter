@@ -20,6 +20,27 @@ def test_research_rename_persists_and_leaves_number_unchanged(tmp_path) -> None:
     assert db.research_number("agent-1", "run-1") == number_before
 
 
+def test_hide_research_is_local_only_and_removes_it_from_cached_runs(tmp_path) -> None:
+    # There is no Virlo API endpoint to delete a Run -- "deleting" a research
+    # item in the app can only ever be a local tombstone that hides it from
+    # this app's own lists, never a call to Virlo's servers.
+    db = Database(tmp_path / "state.db")
+    db.assign_runs("agent-1", [{"id": "run-1", "started_at": "2026-01-01"}])
+    db.assign_runs("agent-1", [{"id": "run-2", "started_at": "2026-01-02"}])
+    assert not db.is_research_hidden("agent-1", "run-1")
+
+    db.hide_research("agent-1", "run-1")
+
+    assert db.is_research_hidden("agent-1", "run-1")
+    assert not db.is_research_hidden("agent-1", "run-2")
+    remaining_ids = {row["id"] for row in db.cached_runs()}
+    assert remaining_ids == {"run-2"}
+
+    # Hiding twice is a no-op, not an error.
+    db.hide_research("agent-1", "run-1")
+    assert db.is_research_hidden("agent-1", "run-1")
+
+
 def test_research_search_matches_custom_name_number_agent_and_run_id() -> None:
     run = Run(
         id="a1b2c3d4-run-id",
