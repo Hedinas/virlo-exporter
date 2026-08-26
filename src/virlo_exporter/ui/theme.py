@@ -183,9 +183,22 @@ QToolButton#modalCloseButton {
 }
 QToolButton#modalCloseButton:hover { color: #F3F4F6; background: #232832; border-radius: 6px; }
 QWidget#completionBackdrop { background: rgba(6, 8, 11, 0.72); }
+QWidget#confirmationBackdrop { background: rgba(6, 8, 11, 0.76); }
 QFrame#completionCard {
     background: #14171D; border: 1px solid #2A303A; border-radius: 14px;
 }
+QFrame#confirmationCard {
+    background: #1B1914; border: 1px solid #5E4B22; border-radius: 13px;
+}
+QLabel#confirmationTitle {
+    color: #F4D67A; font-size: 17px; font-weight: 700; letter-spacing: 0.6px;
+}
+QLabel#confirmationFact { color: #E6E1D7; font-size: 13px; font-weight: 600; }
+QLabel#confirmationMessage { color: #AFA99C; padding-top: 4px; }
+QPushButton#confirmationDelete {
+    background: #8D6822; color: #FFF7E1; border-color: #B4862F;
+}
+QPushButton#confirmationDelete:hover { background: #A87922; border-color: #D29B37; }
 QLabel#completionTitle { font-size: 20px; font-weight: 700; color: #F3F4F6; }
 QLabel#completionDuration { font-size: 15px; color: #9CA3AF; }
 QToolButton#gearButton, QToolButton#pencilButton, QToolButton#iconAction {

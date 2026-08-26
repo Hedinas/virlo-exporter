@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -50,7 +49,6 @@ from virlo_exporter.storage.database import Database
 from virlo_exporter.storage.key_store import ApiKeyStore
 from virlo_exporter.utils.files import (
     delete_directory,
-    directory_size,
     open_in_explorer,
     reveal_in_explorer,
 )
@@ -343,6 +341,102 @@ class ExportCompletionOverlay(QWidget):
         return super().eventFilter(watched, event)
 
 
+class ConfirmationOverlay(QWidget):
+    """Compact, silent in-window confirmation for destructive cloud/local actions."""
+
+    confirmed = Signal()
+    closed = Signal()
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        facts: list[str],
+        message: str,
+        confirm_text: str,
+        parent: QWidget,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("confirmationBackdrop")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        panel = QFrame()
+        panel.setObjectName("confirmationCard")
+        panel.setFixedWidth(440)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(10)
+
+        heading = QLabel(title.upper())
+        heading.setObjectName("confirmationTitle")
+        layout.addWidget(heading)
+        for fact in facts:
+            if fact:
+                label = QLabel(fact)
+                label.setObjectName("confirmationFact")
+                label.setWordWrap(True)
+                layout.addWidget(label)
+        body = QLabel(message)
+        body.setObjectName("confirmationMessage")
+        body.setWordWrap(True)
+        layout.addWidget(body)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("confirmationCancel")
+        cancel.clicked.connect(self.close_and_notify)
+        confirm = QPushButton(confirm_text)
+        confirm.setObjectName("confirmationDelete")
+        confirm.clicked.connect(self._confirm)
+        actions.addWidget(cancel)
+        actions.addWidget(confirm)
+        layout.addLayout(actions)
+
+        outer.addStretch()
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(panel)
+        row.addStretch()
+        outer.addLayout(row)
+        outer.addStretch()
+        parent.installEventFilter(self)
+        self.setGeometry(parent.rect())
+
+    def show_over_parent(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.show()
+        self.raise_()
+        self.setFocus()
+
+    def _confirm(self) -> None:
+        self.confirmed.emit()
+        self.close_and_notify()
+
+    def close_and_notify(self) -> None:
+        parent = self.parentWidget()
+        if parent is not None:
+            parent.removeEventFilter(self)
+        self.hide()
+        self.deleteLater()
+        self.closed.emit()
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.close_and_notify()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:
+        if watched is self.parentWidget() and event.type() == QEvent.Type.Resize:
+            self.setGeometry(watched.rect())
+        return super().eventFilter(watched, event)
+
+
 RUN_STATUS_STATE = {
     "completed": "completed",
     "partial_failure": "warning",
@@ -499,19 +593,19 @@ class AgentRow(QFrame):
         pencil.setObjectName("pencilButton")
         pencil.setIcon(icons.icon("pencil"))
         pencil.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
-        pencil.setToolTip(f"Rename {agent.name}")
+        pencil.setToolTip("Rename")
         pencil.clicked.connect(on_rename)
         gear = QToolButton()
         gear.setObjectName("gearButton")
         gear.setIcon(icons.icon("gear"))
         gear.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
-        gear.setToolTip(f"Edit {agent.name}")
+        gear.setToolTip("Edit")
         gear.clicked.connect(on_edit)
         trash = QToolButton()
         trash.setObjectName("iconAction")
         trash.setIcon(icons.icon("trash"))
         trash.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
-        trash.setToolTip(f"Delete {agent.name}")
+        trash.setToolTip("Delete")
         trash.clicked.connect(on_delete)
         layout.addLayout(text, 1)
         layout.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
@@ -559,7 +653,7 @@ class ResearchRow(QFrame):
         pencil.setObjectName("pencilButton")
         pencil.setIcon(icons.icon("pencil"))
         pencil.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
-        pencil.setToolTip("Rename research")
+        pencil.setToolTip("Rename")
         pencil.clicked.connect(on_rename)
         layout.addLayout(text, 1)
         layout.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
@@ -666,6 +760,7 @@ class MainWindow(QMainWindow):
         # back (or a background refresh) never loses live progress.
         self._live_export_events: dict[str, list[dict[str, Any]]] = {}
         self._active_export_timeline: ExportTimelineWidget | None = None
+        self._confirmation_overlay: ConfirmationOverlay | None = None
         self._active_export_process_id: str | None = None
         self._runs_loading = False
         self.setWindowTitle("Virlo Exporter")
@@ -1375,20 +1470,20 @@ class MainWindow(QMainWindow):
         title.setObjectName("title")
         title_row.addWidget(title)
         title_row.addWidget(
-            icon_action_button("pencil", f"Rename {agent.name}", lambda: self.quick_rename_agent(agent))
+            icon_action_button("pencil", "Rename", lambda: self.quick_rename_agent(agent))
         )
         title_row.addStretch()
         title_row.addLayout(
             icon_toolbar(
                 (
-                    ("gear", "Edit agent settings", lambda: self.edit_agent(agent)),
-                    ("copy", "Copy Agent ID", lambda: QApplication.clipboard().setText(agent.id)),
+                    ("gear", "Edit", lambda: self.edit_agent(agent)),
+                    ("copy", "Copy ID", lambda: QApplication.clipboard().setText(agent.id)),
                     (
                         "folder",
-                        "Open Export Folder",
+                        "Open Folder",
                         lambda: open_in_explorer(Path(self.settings.export_folder)),
                     ),
-                    ("trash", f"Delete {agent.name}", lambda: self.delete_agent(agent)),
+                    ("trash", "Delete", lambda: self.delete_agent(agent)),
                 )
             )
         )
@@ -1540,7 +1635,7 @@ class MainWindow(QMainWindow):
         title.setObjectName("cardTitle")
         top.addWidget(title)
         top.addWidget(
-            icon_action_button("pencil", "Rename locally", lambda: self.rename_research(agent, run))
+            icon_action_button("pencil", "Rename", lambda: self.rename_research(agent, run))
         )
         top.addStretch()
         top.addWidget(
@@ -1564,11 +1659,11 @@ class MainWindow(QMainWindow):
                 ("workflow", "Open Research", lambda: self.show_run(agent, run)),
                 (
                     "folder",
-                    "Open Export Folder",
+                    "Open Folder",
                     lambda: open_in_explorer(Path(self.settings.export_folder)),
                 ),
-                ("copy", "Copy Run ID", lambda: QApplication.clipboard().setText(run.id)),
-                ("trash", "Hide locally", lambda: self.hide_research_locally(agent, run)),
+                ("copy", "Copy ID", lambda: QApplication.clipboard().setText(run.id)),
+                ("trash", "Delete", lambda: self.hide_research_locally(agent, run)),
             )
         )
         actions.addStretch()
@@ -1654,10 +1749,10 @@ class MainWindow(QMainWindow):
         )
 
     def open_export_report(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
-        """"Report" = open EXPORT_REPORT.json itself in its default app."""
+        """Reveal the exact diagnostic report in Explorer."""
         path = self._ensure_report_path(agent, export_record)
         if path is not None:
-            open_in_explorer(path)
+            reveal_in_explorer(path)
 
     def reveal_export_report(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
         """"Show File" = reveal EXPORT_REPORT.json selected in Explorer."""
@@ -1674,44 +1769,26 @@ class MainWindow(QMainWindow):
             payload.get("notices") or [],
             self,
         )
-        dialog.openReportRequested.connect(lambda: self.open_export_report(agent, run, export_record))
-        dialog.exec()
-
-    def _confirm_delete_export(self, number: int, research_number: int, size_text: str) -> bool:
-        """Isolated so tests can stub the modal confirmation without
-        blocking on a real QMessageBox event loop."""
-        message = (
-            f"This will move this export's local files to the Recycle Bin.\n\n"
-            f"Files: ~{size_text}\n\n"
-            f"Research #{research_number:03d} and Virlo data will NOT be deleted.\n\n"
-            "You can restore it from the Recycle Bin afterward if needed."
+        dialog.openReportRequested.connect(
+            lambda: self.reveal_export_report(agent, run, export_record)
         )
-        confirm = QMessageBox(self)
-        confirm.setIcon(QMessageBox.Icon.Warning)
-        confirm.setWindowTitle(f"Delete Export #{number:03d}?")
-        confirm.setText(f"MOVE EXPORT #{number:03d} TO RECYCLE BIN?")
-        confirm.setInformativeText(message)
-        delete_button = confirm.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
-        confirm.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        confirm.setDefaultButton(delete_button)
-        confirm.exec()
-        return confirm.clickedButton() is delete_button
+        dialog.exec()
 
     def delete_export_to_recycle_bin(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> None:
         if str(export_record["status"]) == "running":
-            QMessageBox.information(
-                self, "Export is running", "Cancel the export first, then delete it once it has stopped."
+            self.statusBar().showMessage(
+                "Cancel the running export before deleting it.", 6000
             )
             return
         export_dir = Path(export_record["path"]) if export_record["path"] else None
-        size_text = format_bytes(directory_size(export_dir)) if export_dir and export_dir.exists() else "0 B"
-        if not self._confirm_delete_export(
-            export_record["export_number"], export_record.get("research_number", 0), size_text
-        ):
+        try:
+            if export_dir is not None:
+                delete_directory(export_dir)
+            self.database.delete_export(export_record["id"])
+        except Exception as exc:
+            logger.exception("could not move export to Recycle Bin: %s", exc)
+            self.statusBar().showMessage("Could not delete this export. Its files were kept.", 7000)
             return
-        if export_dir is not None:
-            delete_directory(export_dir)
-        self.database.delete_export(export_record["id"])
         self.show_run(agent, run)
 
     def _export_card(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> QFrame:
@@ -1730,7 +1807,7 @@ class MainWindow(QMainWindow):
         badge = ClickableStatusBadge(display_status_text(status), state)
         has_diagnostic_reason = status in {"failed", "cancelled", "complete_with_warnings"}
         if has_diagnostic_reason and not files_missing:
-            badge.setToolTip("Click for diagnostic details")
+            badge.setToolTip("Diagnostics")
             badge.clicked.connect(
                 lambda _=False, record=export_record: self.show_export_diagnostics(agent, run, record)
             )
@@ -1746,7 +1823,7 @@ class MainWindow(QMainWindow):
                 (
                     (
                         "workflow",
-                        "View process",
+                        "View Process",
                         lambda _=False, record=export_record: self.open_export_history(
                             agent, run, record
                         ),
@@ -1757,7 +1834,7 @@ class MainWindow(QMainWindow):
             actions.addWidget(
                 icon_action_button(
                     "trash",
-                    "Delete (moves to Recycle Bin)",
+                    "Delete",
                     lambda _=False, record=export_record: self.delete_export_to_recycle_bin(
                         agent, run, record
                     ),
@@ -1805,22 +1882,20 @@ class MainWindow(QMainWindow):
             (
                 (
                     "workflow",
-                    "View process",
+                    "View Process",
                     lambda _=False, record=export_record: self.open_export_history(
                         agent, run, record
                     ),
                 ),
                 (
                     "folder",
-                    "Open folder",
+                    "Open Folder",
                     lambda _=False, path=export_record["path"]: open_in_explorer(Path(path)),
                 ),
                 (
                     "document",
-                    "Open report"
-                    if has_diagnostic_reason
-                    else "No diagnostic report issues for this export.",
-                    lambda _=False, record=export_record: self.open_export_report(
+                    "Report",
+                    lambda _=False, record=export_record: self.reveal_export_report(
                         agent, run, record
                     ),
                     has_diagnostic_reason,
@@ -1831,7 +1906,7 @@ class MainWindow(QMainWindow):
         actions.addWidget(
             icon_action_button(
                 "trash",
-                "Delete (moves to Recycle Bin)",
+                "Delete",
                 lambda _=False, record=export_record: self.delete_export_to_recycle_bin(
                     agent, run, record
                 ),
@@ -1869,20 +1944,20 @@ class MainWindow(QMainWindow):
         title_row.addLayout(
             icon_toolbar(
                 (
-                    ("pencil", "Rename research", lambda: self.rename_research(agent, run)),
+                    ("pencil", "Rename", lambda: self.rename_research(agent, run)),
                     (
                         "copy",
-                        "Copy Run ID",
+                        "Copy ID",
                         lambda: QApplication.clipboard().setText(run.id),
                     ),
                     (
                         "folder",
-                        "Open Export Folder",
+                        "Open Folder",
                         lambda: open_in_explorer(Path(self.settings.export_folder)),
                     ),
                     (
                         "trash",
-                        "Hide from Virlo Exporter (local only)",
+                        "Delete",
                         lambda: self.hide_research_locally(agent, run),
                     ),
                 )
@@ -2020,9 +2095,7 @@ class MainWindow(QMainWindow):
             self.connect_api()
             return
         if not self.agents:
-            QMessageBox.information(
-                self, "No Agents", "Create an Agent before starting new research."
-            )
+            show_error(self, "No Agents", "Create an Agent before starting new research.")
             return
         dialog = NewResearchDialog(
             self.agents.values(), self, selected_agent_id=selected_agent_id
@@ -2090,17 +2163,24 @@ class MainWindow(QMainWindow):
         if not self.client:
             return
         action = "pause" if agent.active else "resume"
-        question = (
+        message = (
             "Pause future scheduled runs? A run already in progress may continue."
             if agent.active
             else "Resume future scheduled runs?"
         )
-        if (
-            QMessageBox.question(self, f"{action.title()} Agent", question)
-            != QMessageBox.StandardButton.Yes
-        ):
+        self._show_confirmation(
+            title=f"{action.title()} Agent?",
+            facts=[agent.name, "Recurring Agent"],
+            message=message,
+            confirm_text=action.title(),
+            on_confirm=lambda: self._toggle_agent_confirmed(agent),
+        )
+
+    def _toggle_agent_confirmed(self, agent: Agent) -> None:
+        if not self.client:
             return
         client = self.client
+        action = "pause" if agent.active else "resume"
         self._run_worker(
             lambda: client.update_agent(agent.id, {"active": not agent.active}),
             lambda _result: self.refresh(),
@@ -2135,25 +2215,65 @@ class MainWindow(QMainWindow):
         if self._current_page[:1] == ("run",) and self._current_page[1:] == (agent.id, run.id):
             self.show_run(agent, run)
 
-    def _confirm_hide_research(self, agent: Agent, run: Run) -> bool:
-        answer = QMessageBox.warning(
-            self,
-            "Hide Research",
-            "This removes the research from Virlo Exporter's lists only -- there is no Virlo "
-            "API endpoint to delete a Run, so nothing is removed from your Virlo account. Any "
-            "exports already saved to disk are kept and can still be opened from their folder.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+    def _show_confirmation(
+        self,
+        *,
+        title: str,
+        facts: list[str],
+        message: str,
+        confirm_text: str,
+        on_confirm: Any,
+    ) -> ConfirmationOverlay:
+        if self._confirmation_overlay is not None:
+            self._confirmation_overlay.close_and_notify()
+        overlay = ConfirmationOverlay(
+            title=title,
+            facts=facts,
+            message=message,
+            confirm_text=confirm_text,
+            parent=self.centralWidget(),
         )
-        return answer == QMessageBox.StandardButton.Yes
+        self._confirmation_overlay = overlay
+        overlay.confirmed.connect(on_confirm)
 
-    def hide_research_locally(self, agent: Agent, run: Run) -> None:
-        if not self._confirm_hide_research(agent, run):
-            return
+        def clear_reference() -> None:
+            if self._confirmation_overlay is overlay:
+                self._confirmation_overlay = None
+
+        overlay.closed.connect(clear_reference)
+        overlay.show_over_parent()
+        return overlay
+
+    def _confirm_hide_research(self, agent: Agent, run: Run) -> bool | None:
+        number = run.local_number or 0
+        display_name = self.database.research_display_name(agent.id, run.id)
+        self._show_confirmation(
+            title="Delete Research?",
+            facts=[
+                display_name or f"Research #{number:03d}",
+                f"Research #{number:03d}",
+                agent.name,
+                compact_date(run_timestamp(run)),
+            ],
+            message="This removes it from Virlo Exporter.",
+            confirm_text="Delete",
+            on_confirm=lambda: self._hide_research_confirmed(agent, run),
+        )
+        return None
+
+    def _hide_research_confirmed(self, agent: Agent, run: Run) -> None:
         self.database.hide_research(agent.id, run.id)
-        self.runs[agent.id] = [value for value in self.runs.get(agent.id, []) if value.id != run.id]
+        self.runs[agent.id] = [
+            value for value in self.runs.get(agent.id, []) if value.id != run.id
+        ]
         self._populate_research()
         self.show_agent(agent.id)
+
+    def hide_research_locally(self, agent: Agent, run: Run) -> None:
+        # A boolean True remains supported for isolated tests; production
+        # uses the asynchronous in-window overlay and its confirmation signal.
+        if self._confirm_hide_research(agent, run) is True:
+            self._hide_research_confirmed(agent, run)
 
     def edit_agent(self, agent: Agent) -> None:
         if not self.client:
@@ -2172,14 +2292,21 @@ class MainWindow(QMainWindow):
     def delete_agent(self, agent: Agent) -> None:
         if not self.client:
             return
-        answer = QMessageBox.warning(
-            self,
-            "Delete Agent",
-            "Soft-delete this Agent? Future recurring runs will stop. Previously collected data remains available until purged.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+        self._show_confirmation(
+            title="Delete Agent?",
+            facts=[
+                agent.name,
+                "Recurring" if agent.is_recurring else "One-time",
+                f"{len(self.runs.get(agent.id, []))} research run(s)",
+                agent_display_status(agent, self.runs.get(agent.id, [])),
+            ],
+            message="Future scheduled runs stop. Existing Virlo data is retained.",
+            confirm_text="Delete",
+            on_confirm=lambda: self._delete_agent_confirmed(agent),
         )
-        if answer != QMessageBox.StandardButton.Yes:
+
+    def _delete_agent_confirmed(self, agent: Agent) -> None:
+        if not self.client:
             return
         client = self.client
         self._run_worker(

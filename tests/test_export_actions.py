@@ -63,13 +63,14 @@ def _make_window_with_export(tmp_path, qapp, *, status: str = "complete"):
 
 def test_report_action_targets_the_exact_json_file(tmp_path, qapp, monkeypatch) -> None:
     window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
-    opened: list[Path] = []
-    monkeypatch.setattr("virlo_exporter.ui.main_window.open_in_explorer", lambda path: opened.append(path))
+    revealed: list[Path] = []
+    monkeypatch.setattr(
+        "virlo_exporter.ui.main_window.reveal_in_explorer", lambda path: revealed.append(path)
+    )
 
     window.open_export_report(agent, run, export_record)
 
-    assert len(opened) == 1
-    assert opened[0] == export_dir / report_module.REPORT_FILENAME
+    assert revealed == [export_dir / report_module.REPORT_FILENAME]
 
 
 def test_show_file_action_reveals_the_exact_json_file(tmp_path, qapp, monkeypatch) -> None:
@@ -94,7 +95,7 @@ def test_delete_sends_directory_to_recycle_bin_keeps_db_row_gone_and_numbering(
 ) -> None:
     window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
     assert export_dir.exists()
-    window._confirm_delete_export = lambda *args: True
+    assert not hasattr(window, "_confirm_delete_export")
     sent: list[str] = []
     monkeypatch.setattr("virlo_exporter.ui.main_window.delete_directory", lambda path: sent.append(str(path)))
 
@@ -172,7 +173,7 @@ def _report_button(card) -> QToolButton:
     return next(
         button
         for button in card.findChildren(QToolButton)
-        if button.toolTip() in ("Open report", "No diagnostic report issues for this export.")
+        if button.toolTip() == "Report"
     )
 
 
@@ -183,7 +184,7 @@ def test_report_action_disabled_for_a_fully_clean_export(tmp_path, qapp) -> None
     card = window._export_card(agent, run, export_record)
     button = _report_button(card)
     assert not button.isEnabled()
-    assert button.toolTip() == "No diagnostic report issues for this export."
+    assert button.toolTip() == "Report"
 
 
 def test_report_action_enabled_for_cancelled_warning_and_failed_exports(tmp_path, qapp) -> None:
@@ -194,7 +195,22 @@ def test_report_action_enabled_for_cancelled_warning_and_failed_exports(tmp_path
         card = window._export_card(agent, run, export_record)
         button = _report_button(card)
         assert button.isEnabled(), f"Report must be enabled for status={status}"
-        assert button.toolTip() == "Open report"
+        assert button.toolTip() == "Report"
+
+
+def test_export_delete_has_no_confirmation_and_reports_failure_compactly(
+    tmp_path, qapp, monkeypatch
+) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+
+    def fail_to_trash(_path: Path) -> None:
+        raise OSError("Recycle Bin unavailable")
+
+    monkeypatch.setattr("virlo_exporter.ui.main_window.delete_directory", fail_to_trash)
+    window.delete_export_to_recycle_bin(agent, run, export_record)
+
+    assert window.database.export_history(agent.id, run.id)
+    assert "Could not delete" in window.statusBar().currentMessage()
 
 
 def test_cancel_export_reacts_instantly_and_preserves_route(tmp_path, qapp) -> None:

@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -50,6 +49,9 @@ class ApiKeyDialog(PersistentDialog):
                 QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
             )
         )
+        self.validation_error = QLabel("Virlo API keys begin with virlo_tkn_.")
+        self.validation_error.setObjectName("validationError")
+        self.validation_error.hide()
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -60,6 +62,7 @@ class ApiKeyDialog(PersistentDialog):
         layout.addSpacing(8)
         layout.addWidget(self.key_edit)
         layout.addWidget(self.show_key)
+        layout.addWidget(self.validation_error)
         layout.addWidget(buttons)
         self.restore_saved_geometry(self.minimumSizeHint())
 
@@ -68,7 +71,8 @@ class ApiKeyDialog(PersistentDialog):
 
     def accept(self) -> None:
         if not self.api_key().startswith("virlo_tkn_"):
-            QMessageBox.warning(self, "Invalid API key", "Virlo API keys begin with virlo_tkn_.")
+            self.validation_error.show()
+            self.key_edit.setFocus()
             return
         super().accept()
 
@@ -269,7 +273,7 @@ class ExportDiagnosticsDialog(PersistentDialog):
         layout.addWidget(scroll, 1)
 
         actions = QHBoxLayout()
-        open_report = QPushButton("Open Full Report")
+        open_report = QPushButton("Report")
         open_report.setObjectName("primary")
         open_report.clicked.connect(self.openReportRequested.emit)
         close = QPushButton("Close")
@@ -362,7 +366,7 @@ class StageDiagnosticsDialog(PersistentDialog):
         copy_button.clicked.connect(
             lambda: QApplication.clipboard().setText(self._technical_text)
         )
-        report_button = QPushButton("Open Report")
+        report_button = QPushButton("Report")
         report_button.clicked.connect(self.openReportRequested.emit)
         close_button = QPushButton("Close")
         close_button.clicked.connect(self.accept)

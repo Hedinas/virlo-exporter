@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -548,6 +547,11 @@ class AgentEditorDialog(PersistentDialog):
         form.addWidget(cost_card)
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
+        self.form_error = QLabel()
+        self.form_error.setObjectName("validationError")
+        self.form_error.setWordWrap(True)
+        self.form_error.hide()
+        root.addWidget(self.form_error)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -620,8 +624,10 @@ class AgentEditorDialog(PersistentDialog):
         if not self._platform_values():
             errors.append("Select at least one platform.")
         if errors:
-            QMessageBox.warning(self, "Check Agent settings", "\n".join(errors))
+            self.form_error.setText("  ·  ".join(errors))
+            self.form_error.show()
             return
+        self.form_error.hide()
         payload: dict[str, Any] = {
             "intent": self.intent.text().strip(),
             "keywords": self.keywords.keywords(),
@@ -750,6 +756,10 @@ class RenameDialog(PersistentDialog):
         self.name_edit = QLineEdit(current_name)
         self.name_edit.selectAll()
         layout.addWidget(self.name_edit)
+        self.validation_error = QLabel("Enter a non-empty name.")
+        self.validation_error.setObjectName("validationError")
+        self.validation_error.hide()
+        layout.addWidget(self.validation_error)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -763,7 +773,8 @@ class RenameDialog(PersistentDialog):
 
     def accept(self) -> None:
         if not self.value():
-            QMessageBox.warning(self, "Name required", "Enter a non-empty name.")
+            self.validation_error.show()
+            self.name_edit.setFocus()
             return
         super().accept()
 

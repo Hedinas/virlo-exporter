@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QPushButton
 
 from virlo_exporter.config import AppSettings, SettingsStore
 from virlo_exporter.storage.database import Database
-from virlo_exporter.ui.main_window import MainWindow
+from virlo_exporter.ui.main_window import ConfirmationOverlay, MainWindow
 
 
 class NoKeyStore:
@@ -88,6 +89,49 @@ def test_declining_hide_research_confirmation_keeps_it(tmp_path, qapp) -> None:
 
     assert not window.database.is_research_hidden("agent-1", run.id)
     assert run.id in [value.id for value in window.runs.get("agent-1", [])]
+
+
+def test_research_delete_uses_silent_in_window_confirmation(tmp_path, qapp) -> None:
+    window = _make_window(tmp_path, qapp)
+    agent = window.agents["agent-1"]
+    run = window.runs["agent-1"][0]
+    window.show_run(agent, run)
+
+    window.hide_research_locally(agent, run)
+    overlay = window.centralWidget().findChild(ConfirmationOverlay)
+    assert overlay is not None
+    assert overlay.parentWidget() is window.centralWidget()
+    assert not overlay.isWindow()
+    overlay.findChild(QPushButton, "confirmationCancel").click()
+    assert run.id in [value.id for value in window.runs.get(agent.id, [])]
+    assert window._current_page == ("run", agent.id, run.id)
+
+    window.hide_research_locally(agent, run)
+    overlay = window.centralWidget().findChild(ConfirmationOverlay)
+    overlay.findChild(QPushButton, "confirmationDelete").click()
+    assert window.database.is_research_hidden(agent.id, run.id)
+    assert window._current_page == ("agent", agent.id)
+
+
+def test_agent_delete_uses_in_window_confirmation_with_compact_facts(
+    tmp_path, qapp, monkeypatch
+) -> None:
+    from PySide6.QtWidgets import QLabel
+
+    window = _make_window(tmp_path, qapp)
+    agent = window.agents["agent-1"]
+    window.client = object()  # presence enables the UI; no API call is made in this test
+    deleted = []
+    monkeypatch.setattr(window, "_delete_agent_confirmed", lambda value: deleted.append(value.id))
+
+    window.delete_agent(agent)
+    overlay = window.centralWidget().findChild(ConfirmationOverlay)
+    assert overlay is not None
+    facts = [label.text() for label in overlay.findChildren(QLabel)]
+    assert agent.name in facts
+    assert any("research run" in fact for fact in facts)
+    overlay.findChild(QPushButton, "confirmationDelete").click()
+    assert deleted == [agent.id]
 
 
 def test_process_row_selection_survives_background_refresh(tmp_path, qapp) -> None:
