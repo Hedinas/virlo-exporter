@@ -7,7 +7,7 @@ from PySide6.QtCore import QCoreApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from virlo_exporter.config import SettingsStore, app_data_dir, project_root
+from virlo_exporter.config import SettingsStore, app_data_dir, migrate_legacy_exports, project_root
 from virlo_exporter.storage.database import Database
 from virlo_exporter.storage.key_store import ApiKeyStore
 from virlo_exporter.ui.main_window import MainWindow
@@ -32,6 +32,8 @@ def main() -> int:
     settings_store = SettingsStore(data_dir / "settings.json")
     settings = settings_store.load()
     Path(settings.export_folder).mkdir(parents=True, exist_ok=True)
+    migrate_legacy_exports(settings)
+    settings_store.save(settings)
     database = Database(data_dir / "virlo-exporter.db")
     window = MainWindow(settings_store, settings, ApiKeyStore(), database)
     install_dark_title_bar(window)
