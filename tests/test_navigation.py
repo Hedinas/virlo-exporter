@@ -216,6 +216,27 @@ def test_background_refresh_does_not_force_navigation_away_from_research(tmp_pat
     assert window.agent_list.currentItem() is None
 
 
+def test_deleted_agent_orphans_local_research_from_the_ui_without_deleting_data(tmp_path, qapp) -> None:
+    # Documents a real, previously-unclear consequence of Agent delete:
+    # _populate_agents() rebuilds self.agents strictly from the latest API
+    # response, so once an agent no longer comes back from list_agents()
+    # (e.g. after DELETE /agents/{id}), its local Research/export history
+    # is NOT deleted (no DB rows or files are touched) but becomes
+    # unreachable through this app's UI, since _all_research() only
+    # surfaces runs whose owning agent is still in self.agents.
+    window = _make_window(tmp_path, qapp)
+    assert window.database.cached_agents()  # the row is genuinely still there
+    assert window.database.cached_runs()
+
+    window._populate_agents([])  # simulates the agent no longer returned by the API
+
+    assert window.agents == {}
+    assert window._all_research() == []  # invisible in the UI now
+    # But nothing was actually deleted locally:
+    assert window.database.cached_agents()
+    assert window.database.cached_runs()
+
+
 def test_cancelling_process_shows_interrupting_and_stops_animating(tmp_path, qapp) -> None:
     from PySide6.QtWidgets import QLabel
 

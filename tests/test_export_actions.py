@@ -259,3 +259,20 @@ def test_research_run_card_is_bounded_width(tmp_path, qapp) -> None:
     window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
     card = window._run_card(agent, run)
     assert card.maximumWidth() <= 520
+
+
+def test_corrupt_report_file_degrades_gracefully_instead_of_crashing(tmp_path, qapp) -> None:
+    # Error-matrix case: a report file that exists but is not valid JSON
+    # (e.g. truncated by an external disk issue, or hand-edited) must never
+    # crash the app -- it should be treated the same as a missing report.
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    (export_dir / "EXPORT_REPORT.json").write_text("{not valid json!!", encoding="utf-8")
+
+    payload = window._read_export_report_payload(export_record["path"])
+    assert payload == {}
+    summary = window._read_export_summary(export_record["path"])
+    assert summary == {}
+
+    # The export card itself must still render without raising.
+    card = window._export_card(agent, run, export_record)
+    assert card is not None
