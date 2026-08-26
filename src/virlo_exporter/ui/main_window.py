@@ -7,8 +7,8 @@ from pathlib import Path
 from threading import Event
 from typing import Any
 
-from PySide6.QtCore import QEvent, QSettings, QSize, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import QEvent, QRectF, QSettings, QSize, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -70,7 +70,12 @@ from .dialogs import (
     SettingsDialog,
     show_error,
 )
-from .export_view import ExportTimelineWidget, format_bytes
+from .export_view import (
+    PROGRESS_COLOR,
+    ExportTimelineWidget,
+    format_bytes,
+    stroke_indeterminate_segment,
+)
 from .logic import agent_display_status, research_search_text, run_timestamp
 
 logger = logging.getLogger(__name__)
@@ -529,12 +534,20 @@ class ResearchRow(QFrame):
 
 
 class ProcessRow(QFrame):
+    """A pinned Active Processes row. When `active`, a small green segment
+    travels around the card's perimeter -- an indeterminate "this is still
+    alive" signal, not a real percentage. Stops and disappears the moment
+    the underlying process is no longer running (the row is simply not
+    recreated on the next sidebar rebuild)."""
+
     clicked = Signal()
 
-    def __init__(self, title_text: str, secondary_text: str) -> None:
+    def __init__(self, title_text: str, secondary_text: str, *, active: bool = False) -> None:
         super().__init__()
         self.setObjectName("sidebarRow")
         self.setProperty("selected", False)
+        self._active = active
+        self._offset = 0.0
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 7, 10, 7)
         layout.setSpacing(1)
@@ -546,6 +559,15 @@ class ProcessRow(QFrame):
         secondary.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(secondary)
+        self._timer: QTimer | None = None
+        if active:
+            self._timer = QTimer(self)
+            self._timer.timeout.connect(self._advance)
+            self._timer.start(50)
+
+    def _advance(self) -> None:
+        self._offset = (self._offset + 0.01) % 1.0
+        self.update()
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
@@ -556,6 +578,23 @@ class ProcessRow(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
+
+    def paintEvent(self, event: Any) -> None:
+        super().paintEvent(event)
+        if not self._active:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect().adjusted(1, 1, -1, -1))
+        path = QPainterPath()
+        path.addRoundedRect(rect, 8, 8)
+        if path.length() <= 0:
+            return
+        pen = QPen(PROGRESS_COLOR, 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        stroke_indeterminate_segment(painter, path, self._offset, 0.22)
 
 
 class MainWindow(QMainWindow):
@@ -1041,7 +1080,7 @@ class MainWindow(QMainWindow):
             secondary = str(payload.get("stage") or process["status"]).replace("_", " ").title()
             if isinstance(payload.get("percent"), (int, float)):
                 secondary = f"{secondary} · {int(payload['percent'])}%"
-            row = ProcessRow(process["label"], secondary)
+            row = ProcessRow(process["label"], secondary, active=True)
             self.process_list.addItem(item)
             self.process_list.setItemWidget(item, row)
             if self._process_keys_match(key, current_key):

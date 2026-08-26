@@ -5,7 +5,23 @@ from PySide6.QtCore import QSettings
 from virlo_exporter.config import AppSettings, SettingsStore
 from virlo_exporter.storage.database import Database
 from virlo_exporter.ui.components import CollapsibleSection
-from virlo_exporter.ui.main_window import MainWindow
+from virlo_exporter.ui.main_window import MainWindow, ProcessRow
+
+
+def test_active_process_row_animates_its_perimeter(qapp) -> None:
+    row = ProcessRow("Export #007", "Fetching videos", active=True)
+    assert row._timer is not None  # noqa: SLF001
+    assert row._timer.isActive()  # noqa: SLF001
+
+    start = row._offset  # noqa: SLF001
+    row._advance()  # noqa: SLF001
+    assert row._offset != start  # noqa: SLF001
+    assert 0.0 <= row._offset < 1.0  # noqa: SLF001
+
+
+def test_inactive_process_row_does_not_animate(qapp) -> None:
+    row = ProcessRow("Research #003 · Raxeko", "Processing", active=False)
+    assert row._timer is None  # noqa: SLF001
 
 
 class NoKeyStore:
