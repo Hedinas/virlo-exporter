@@ -165,6 +165,10 @@ QStatusBar::item { border: none; }
 QToolBar, QDockWidget { background: #12151A; border: 1px solid #2A303A; }
 QSplitter::handle { background: #2A303A; }
 QSplitter::handle:hover { background: #3B82F6; }
+QSplitter#configurationSplitter::handle {
+    background: transparent; border-right: 1px solid #2A303A;
+}
+QSplitter#configurationSplitter::handle:hover { border-right: 1px solid #3B82F6; }
 QSplitter#mainSplitter::handle { background: #252B34; }
 QSplitter#mainSplitter::handle:hover { background: #3B82F6; }
 

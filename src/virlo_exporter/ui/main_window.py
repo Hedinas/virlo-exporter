@@ -474,7 +474,9 @@ class RowList(QWidget):
 class AgentRow(QFrame):
     clicked = Signal()
 
-    def __init__(self, agent: Agent, status: str, on_edit: Any, on_rename: Any) -> None:
+    def __init__(
+        self, agent: Agent, status: str, on_edit: Any, on_rename: Any, on_delete: Any
+    ) -> None:
         super().__init__()
         self.setObjectName("sidebarRow")
         self.setProperty("selected", False)
@@ -505,9 +507,16 @@ class AgentRow(QFrame):
         gear.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
         gear.setToolTip(f"Edit {agent.name}")
         gear.clicked.connect(on_edit)
+        trash = QToolButton()
+        trash.setObjectName("iconAction")
+        trash.setIcon(icons.icon("trash"))
+        trash.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
+        trash.setToolTip(f"Delete {agent.name}")
+        trash.clicked.connect(on_delete)
         layout.addLayout(text, 1)
         layout.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
         layout.addWidget(gear, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(trash, 0, Qt.AlignmentFlag.AlignTop)
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
@@ -1031,6 +1040,7 @@ class MainWindow(QMainWindow):
                 status,
                 lambda _=False, value=agent: self.edit_agent(value),
                 lambda _=False, value=agent: self.quick_rename_agent(value),
+                lambda _=False, value=agent: self.delete_agent(value),
             )
             self.agent_list.addItem(item)
             self.agent_list.setItemWidget(item, row)
@@ -1359,23 +1369,18 @@ class MainWindow(QMainWindow):
         body = QWidget()
         layout = QVBoxLayout(body)
         layout.setSpacing(14)
-        header = QHBoxLayout()
         title_box = QVBoxLayout()
+        title_row = QHBoxLayout()
         title = QLabel(agent.name)
         title.setObjectName("title")
-        status = agent_display_status(agent, known_runs or [])
-        mode = "Recurring" if agent.is_recurring else "One-time"
-        title_box.addWidget(title)
-        title_box.addWidget(muted(f"{mode} · {status}"))
-        latest = max(known_runs or [], key=run_timestamp, default=None)
-        title_box.addWidget(
-            muted(f"Last Research: {human_date(run_timestamp(latest) if latest else agent.last_run_at)}")
+        title_row.addWidget(title)
+        title_row.addWidget(
+            icon_action_button("pencil", f"Rename {agent.name}", lambda: self.quick_rename_agent(agent))
         )
-        header.addLayout(title_box, 1)
-        header.addLayout(
+        title_row.addStretch()
+        title_row.addLayout(
             icon_toolbar(
                 (
-                    ("pencil", f"Rename {agent.name}", lambda: self.quick_rename_agent(agent)),
                     ("gear", "Edit agent settings", lambda: self.edit_agent(agent)),
                     ("copy", "Copy Agent ID", lambda: QApplication.clipboard().setText(agent.id)),
                     (
@@ -1383,10 +1388,19 @@ class MainWindow(QMainWindow):
                         "Open Export Folder",
                         lambda: open_in_explorer(Path(self.settings.export_folder)),
                     ),
+                    ("trash", f"Delete {agent.name}", lambda: self.delete_agent(agent)),
                 )
             )
         )
-        layout.addLayout(header)
+        title_box.addLayout(title_row)
+        status = agent_display_status(agent, known_runs or [])
+        mode = "Recurring" if agent.is_recurring else "One-time"
+        title_box.addWidget(muted(f"{mode} · {status}"))
+        latest = max(known_runs or [], key=run_timestamp, default=None)
+        title_box.addWidget(
+            muted(f"Last Research: {human_date(run_timestamp(latest) if latest else agent.last_run_at)}")
+        )
+        layout.addLayout(title_box)
 
         overview, overview_layout = card()
         overview_layout.addWidget(card_heading("Agent configuration"))
@@ -1418,9 +1432,11 @@ class MainWindow(QMainWindow):
         platform_host = QWidget()
         platform_host.setLayout(platform_row)
         left_layout.addWidget(platform_host)
-        grid = FlowLayout(spacing=8)
+
+        left_layout.addWidget(section_label("Configuration"))
         di_enabled = agent.data_intelligence_enabled
-        params = [
+        config_grid = FlowLayout(spacing=8)
+        for label_text, value_text, state in (
             ("Language", "English only" if agent.english_only else "All languages", "neutral"),
             ("Type", mode, "neutral"),
             ("Data Intelligence", "● ON" if di_enabled else "● OFF", "on" if di_enabled else "off"),
@@ -1430,29 +1446,40 @@ class MainWindow(QMainWindow):
                 "on" if agent.meta_ads_enabled else "off",
             ),
             ("Cadence", agent.cadence or "—", "neutral"),
-            (
-                "Last Research",
-                human_date(run_timestamp(latest) if latest else agent.last_run_at),
-                "neutral",
-            ),
+        ):
+            config_grid.addWidget(mini_card(label_text, value_text, state))
+        config_grid_host = QWidget()
+        config_grid_host.setLayout(config_grid)
+        left_layout.addWidget(config_grid_host)
+
+        left_layout.addWidget(section_label("Activity"))
+        activity_fields = [
+            ("Created", human_date(agent.created_at)),
+            ("Researches", str(len(known_runs or []))),
+            ("Last Research", human_date(run_timestamp(latest) if latest else agent.last_run_at)),
+            ("Keywords", f"{len(agent.keywords)}"),
         ]
-        for label_text, value_text, state in params:
-            grid.addWidget(mini_card(label_text, value_text, state))
-        grid_host = QWidget()
-        grid_host.setLayout(grid)
-        left_layout.addWidget(grid_host)
+        if agent.is_recurring and agent.next_run_at:
+            activity_fields.append(("Next Research", human_date(agent.next_run_at)))
+        activity_grid = FlowLayout(spacing=8)
+        for label_text, value_text in activity_fields:
+            activity_grid.addWidget(mini_card(label_text, value_text))
+        activity_grid_host = QWidget()
+        activity_grid_host.setLayout(activity_grid)
+        left_layout.addWidget(activity_grid_host)
+        left_layout.addStretch()
+
         actions = QHBoxLayout()
-        new_research = QPushButton("New Research")
-        new_research.setObjectName("primary")
-        new_research.clicked.connect(lambda: self.show_new_research(agent.id))
-        actions.addWidget(new_research)
+        actions.addStretch()
         if agent.is_recurring:
             toggle = QPushButton("Pause" if agent.active else "Resume")
             toggle.clicked.connect(lambda: self.toggle_agent(agent))
             actions.addWidget(toggle)
-        actions.addStretch()
+        new_research = QPushButton("New Research")
+        new_research.setObjectName("primary")
+        new_research.clicked.connect(lambda: self.show_new_research(agent.id))
+        actions.addWidget(new_research)
         left_layout.addLayout(actions)
-        left_layout.addStretch()
         config_splitter.addWidget(left)
 
         keywords_panel = QFrame()
@@ -1491,8 +1518,12 @@ class MainWindow(QMainWindow):
         elif not known_runs:
             layout.addWidget(muted("No research runs yet"))
         else:
+            runs_flow = FlowLayout(spacing=12)
+            runs_host = QWidget()
+            runs_host.setLayout(runs_flow)
             for run in sorted(known_runs, key=run_timestamp, reverse=True):
-                layout.addWidget(self._run_card(agent, run))
+                runs_flow.addWidget(self._run_card(agent, run))
+            layout.addWidget(runs_host)
         layout.addStretch()
         scroll.setWidget(body)
         page_layout.addWidget(scroll)
@@ -1501,12 +1532,16 @@ class MainWindow(QMainWindow):
 
     def _run_card(self, agent: Agent, run: Run) -> QFrame:
         frame, layout = card()
+        frame.setMaximumWidth(520)
         number = run.local_number or 0
         display_name = self.database.research_display_name(agent.id, run.id)
         top = QHBoxLayout()
         title = QLabel(display_name or f"Research #{number:03d}")
         title.setObjectName("cardTitle")
         top.addWidget(title)
+        top.addWidget(
+            icon_action_button("pencil", "Rename locally", lambda: self.rename_research(agent, run))
+        )
         top.addStretch()
         top.addWidget(
             status_badge(run.status.replace("_", " "), RUN_STATUS_STATE.get(run.status.casefold(), "neutral"))
@@ -1517,21 +1552,25 @@ class MainWindow(QMainWindow):
             subtitle = f"Research #{number:03d} · {agent.name} · {human_date(run_timestamp(run))}"
         layout.addWidget(muted(subtitle))
 
-        metrics_row = QHBoxLayout()
-        metrics_row.setSpacing(8)
-        for label_text, value_text in (
-            ("Videos", f"{run.videos_linked:,}"),
-            ("Slideshows", f"{run.slideshows_linked:,}"),
-            ("Meta Ads", f"{run.meta_ads_linked:,}"),
-            ("Outliers", f"{run.outliers_identified:,}"),
-        ):
-            metrics_row.addWidget(metric_card(label_text, value_text))
-        layout.addLayout(metrics_row)
+        metrics_flow = FlowLayout(spacing=8)
+        metrics_host = QWidget()
+        metrics_host.setLayout(metrics_flow)
+        for label_text, value_text in self._run_metrics(run):
+            metrics_flow.addWidget(metric_card(label_text, value_text))
+        layout.addWidget(metrics_host)
 
-        actions = QHBoxLayout()
-        open_button = QPushButton("Open Research")
-        open_button.clicked.connect(lambda: self.show_run(agent, run))
-        actions.addWidget(open_button)
+        actions = icon_toolbar(
+            (
+                ("workflow", "Open Research", lambda: self.show_run(agent, run)),
+                (
+                    "folder",
+                    "Open Export Folder",
+                    lambda: open_in_explorer(Path(self.settings.export_folder)),
+                ),
+                ("copy", "Copy Run ID", lambda: QApplication.clipboard().setText(run.id)),
+                ("trash", "Hide locally", lambda: self.hide_research_locally(agent, run)),
+            )
+        )
         actions.addStretch()
         export = QPushButton("Export")
         export.setObjectName("primary")
@@ -1540,6 +1579,39 @@ class MainWindow(QMainWindow):
         actions.addWidget(export)
         layout.addLayout(actions)
         return frame
+
+    @staticmethod
+    def _run_metrics(run: Run) -> list[tuple[str, str]]:
+        """Only metrics with real data on the Run itself -- no invented
+        tiles, and no extra API calls made just to populate the UI."""
+        raw = run.raw or {}
+        metrics = [
+            ("Videos", f"{run.videos_linked:,}"),
+            ("Slideshows", f"{run.slideshows_linked:,}"),
+            ("Meta Ads", f"{run.meta_ads_linked:,}"),
+            ("Outliers", f"{run.outliers_identified:,}"),
+        ]
+        trends = raw.get("trends_detected")
+        if isinstance(trends, int):
+            metrics.append(("Trends", f"{trends:,}"))
+        return metrics
+
+    @staticmethod
+    def _platform_pills(agent: Agent, run: Run) -> list[tuple[str, int | None]]:
+        """One pill per Platform the Agent is actually configured for, with
+        its real linked count when Virlo provides one -- Meta Ads counts as
+        the fourth Platform here, never folded into the Videos total."""
+        raw = run.raw or {}
+        counts = {
+            "youtube": raw.get("youtube_count"),
+            "tiktok": raw.get("tiktok_count"),
+            "instagram": raw.get("instagram_count"),
+            "meta_ads": run.meta_ads_linked or raw.get("meta_ads_count"),
+        }
+        return [
+            ("Meta Ads" if value == "meta_ads" else value.title(), counts.get(value))
+            for value in agent.platforms
+        ]
 
     @staticmethod
     def _read_export_report_payload(export_dir: str) -> dict[str, Any]:
@@ -1554,6 +1626,20 @@ class MainWindow(QMainWindow):
     def _read_export_summary(cls, export_dir: str) -> dict[str, Any]:
         summary = cls._read_export_report_payload(export_dir).get("summary")
         return summary if isinstance(summary, dict) else {}
+
+    @staticmethod
+    def _export_duration_text(export_record: dict[str, Any]) -> str | None:
+        started, completed = export_record.get("started_at"), export_record.get("completed_at")
+        if not started or not completed:
+            return None
+        try:
+            start = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+            end = datetime.fromisoformat(str(completed).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        seconds = max(0, int((end - start).total_seconds()))
+        minutes, seconds = divmod(seconds, 60)
+        return f"{minutes}m {seconds:02d}s"
 
     def _ensure_report_path(self, agent: Agent, export_record: dict[str, Any]) -> Path | None:
         export_dir = Path(export_record["path"])
@@ -1682,14 +1768,29 @@ class MainWindow(QMainWindow):
 
         summary = self._read_export_summary(export_record["path"])
         metrics: list[tuple[str, str]] = []
-        if "dataset_bytes" in summary:
-            metrics.append(("AI Dataset", format_bytes(summary["dataset_bytes"])))
-        if "raw_bytes" in summary:
-            metrics.append(("RAW Data", format_bytes(summary["raw_bytes"])))
-        if "videos" in summary:
-            metrics.append(("Videos", f"{summary['videos']:,}"))
-        if summary.get("warnings"):
-            metrics.append(("Warnings", str(summary["warnings"])))
+        if status == "cancelled":
+            # A cancelled export usually has little or no real data -- show
+            # what actually happened (where it stopped) rather than padding
+            # the card with meaningless zeroed-out metric tiles.
+            interrupted_stage = summary.get("interrupted_stage")
+            if interrupted_stage:
+                metrics.append(("Stage", str(interrupted_stage).replace("_", " ").title()))
+            if isinstance(summary.get("interrupted_page"), int):
+                metrics.append(("Page", str(summary["interrupted_page"])))
+            duration = self._export_duration_text(export_record)
+            if duration:
+                metrics.append(("Duration", duration))
+            if summary.get("videos"):
+                metrics.append(("Videos", f"{summary['videos']:,}"))
+        else:
+            if summary.get("dataset_bytes"):
+                metrics.append(("AI Dataset", format_bytes(summary["dataset_bytes"])))
+            if summary.get("raw_bytes"):
+                metrics.append(("RAW Data", format_bytes(summary["raw_bytes"])))
+            if summary.get("videos"):
+                metrics.append(("Videos", f"{summary['videos']:,}"))
+            if summary.get("warnings"):
+                metrics.append(("Warnings", str(summary["warnings"])))
         if not metrics:
             layout.addWidget(muted("No export data produced."))
         else:
@@ -1798,28 +1899,31 @@ class MainWindow(QMainWindow):
         header_box.addWidget(muted(human_date(run_timestamp(run))))
         layout.addLayout(header_box)
 
-        metrics_row = QHBoxLayout()
-        metrics_row.setSpacing(10)
-        for label_text, value_text in (
-            ("Videos", f"{run.videos_linked:,}"),
-            ("Slideshows", f"{run.slideshows_linked:,}"),
-            ("Meta Ads", f"{run.meta_ads_linked:,}"),
-            ("Outliers", f"{run.outliers_identified:,}"),
-        ):
-            metrics_row.addWidget(metric_card(label_text, value_text))
-        layout.addLayout(metrics_row)
+        metrics_flow = FlowLayout(spacing=10)
+        metrics_host = QWidget()
+        metrics_host.setLayout(metrics_flow)
+        for label_text, value_text in self._run_metrics(run):
+            metrics_flow.addWidget(metric_card(label_text, value_text))
+        layout.addWidget(metrics_host)
 
-        raw = run.raw or {}
-        platform_counts = [
-            (name, raw.get(f"{name}_count"))
-            for name in ("youtube", "tiktok", "instagram")
-            if raw.get(f"{name}_count") is not None
-        ]
-        if platform_counts:
-            breakdown = "   ·   ".join(f"{name.title()} {count:,}" for name, count in platform_counts)
-            layout.addWidget(muted(breakdown))
+        platforms, platforms_layout = card()
+        platforms_layout.addWidget(card_heading("Platforms"))
+        platform_row = QHBoxLayout()
+        platform_row.setSpacing(6)
+        for label_text, count in self._platform_pills(agent, run):
+            platform_row.addWidget(pill(f"{label_text}   {count:,}" if isinstance(count, int) else label_text))
+        platform_row.addStretch()
+        platform_host = QWidget()
+        platform_host.setLayout(platform_row)
+        platforms_layout.addWidget(platform_host)
+        layout.addWidget(platforms)
+
+        compact_row = FlowLayout(spacing=14)
+        compact_host = QWidget()
+        compact_host.setLayout(compact_row)
 
         run_info, run_info_layout = card()
+        run_info.setMaximumWidth(520)
         run_info_layout.addWidget(card_heading("Run info"))
         duration = "—"
         if run.execution_time_ms:
@@ -1840,18 +1944,10 @@ class MainWindow(QMainWindow):
         run_info_grid_host = QWidget()
         run_info_grid_host.setLayout(run_info_grid)
         run_info_layout.addWidget(run_info_grid_host)
-        run_info_layout.addWidget(section_label("Platforms"))
-        run_platform_row = QHBoxLayout()
-        run_platform_row.setSpacing(6)
-        for value in agent.platforms:
-            run_platform_row.addWidget(pill("Meta Ads" if value == "meta_ads" else value.title()))
-        run_platform_row.addStretch()
-        run_platform_host = QWidget()
-        run_platform_host.setLayout(run_platform_row)
-        run_info_layout.addWidget(run_platform_host)
-        layout.addWidget(run_info)
+        compact_row.addWidget(run_info)
 
         intelligence, intelligence_layout = card()
+        intelligence.setMaximumWidth(420)
         intelligence_layout.addWidget(card_heading("Intelligence"))
         analysis_data = agent.raw.get("analysis_data")
         analysis_ready = bool(analysis_data)
@@ -1884,7 +1980,8 @@ class MainWindow(QMainWindow):
         intelligence_grid_host = QWidget()
         intelligence_grid_host.setLayout(intelligence_grid)
         intelligence_layout.addWidget(intelligence_grid_host)
-        layout.addWidget(intelligence)
+        compact_row.addWidget(intelligence)
+        layout.addWidget(compact_host)
 
         export = QPushButton("Export")
         export.setObjectName("primary")

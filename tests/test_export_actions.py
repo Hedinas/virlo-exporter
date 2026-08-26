@@ -222,3 +222,40 @@ def test_cancel_export_reacts_instantly_and_preserves_route(tmp_path, qapp) -> N
     window._export_failed(process_id, Exception(), "ExportCancelled")
     assert process_id not in window._cancelling_process_ids
     assert window._current_page == route_before
+
+
+def test_cancelled_export_card_shows_interrupted_context_not_zeroed_metrics(tmp_path, qapp) -> None:
+    from PySide6.QtWidgets import QLabel
+
+    window, agent, run, export_record, export_dir = _make_window_with_export(
+        tmp_path, qapp, status="cancelled"
+    )
+    report = report_module.build_report(
+        export_row={"export_number": export_record["export_number"], "research_number": 1, "status": "cancelled"},
+        stages=[],
+        agent_name="Raxeko",
+        summary={
+            "videos": 0,
+            "warnings": 0,
+            "paid_api_calls": 0,
+            "reason": "user_cancelled",
+            "interrupted_stage": "videos",
+            "interrupted_page": 14,
+        },
+    )
+    report_module.write_report(export_dir, report)
+    export_record = dict(export_record)
+    export_record["started_at"] = "2026-08-26T05:44:00Z"
+    export_record["completed_at"] = "2026-08-26T05:45:37Z"
+
+    card = window._export_card(agent, run, export_record)
+    labels = [label.text() for label in card.findChildren(QLabel)]
+    assert "VIDEOS" not in labels  # no meaningless "Videos 0" metric tile
+    assert any("1m 37s" in text for text in labels)
+    assert any(text == "Videos" for text in labels)  # the interrupted-stage value itself
+
+
+def test_research_run_card_is_bounded_width(tmp_path, qapp) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    card = window._run_card(agent, run)
+    assert card.maximumWidth() <= 520
