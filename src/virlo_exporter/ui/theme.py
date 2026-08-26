@@ -235,8 +235,17 @@ QLabel#statusBadge[state="warning"] { background: #2E2411; color: #F2B84B; }
 QLabel#statusBadge[state="failed"] { background: #331416; color: #F87171; }
 QLabel#statusBadge[state="neutral"] { background: #1C2027; color: #9CA3AF; }
 QLabel#stageBlockTitle { font-size: 11px; font-weight: 700; letter-spacing: 0.5px; color: #D8DCE3; }
-QLabel#stageBlockPercent { font-size: 17px; font-weight: 700; color: #F3F4F6; }
+QLabel#stageBlockRange { font-size: 10px; color: #6B7280; }
 QLabel#stageBlockDetail { font-size: 11px; color: #9CA3AF; }
+QLabel#stageStatusBox {
+    border-radius: 6px; font-size: 11px; font-weight: 700;
+    background: #1C2027; color: #D8DCE3; border: 1px solid #2A303A;
+}
+QLabel#stageStatusBox[state="running"] { color: #34D399; border-color: #2FA66C; }
+QLabel#stageStatusBox[state="complete"] { background: #123524; color: #34D399; border-color: #2FA66C; }
+QLabel#stageStatusBox[state="warning"] { background: #2E2411; color: #F2B84B; border-color: #D69632; }
+QLabel#stageStatusBox[state="failed"] { background: #331416; color: #F87171; border-color: #EF4444; }
+QLabel#stageStatusBox[state="neutral"] { background: #1C2027; color: #9CA3AF; border-color: #2A303A; }
 QFrame#intentField, QFrame#keywordEditor {
     background: #1C2027; border: 1px solid #2A303A; border-radius: 8px;
 }

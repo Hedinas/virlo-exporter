@@ -60,6 +60,7 @@ class StageTracker:
         current: int | None = None,
         total: int | None = None,
         message: str | None = None,
+        page: int | None = None,
     ) -> None:
         if self.current is None:
             return
@@ -69,6 +70,8 @@ class StageTracker:
             self.current["total"] = total
         if message is not None:
             self.current["message"] = message
+        if page is not None:
+            self.current["page"] = page
         self._publish(persist=False)
 
     def _publish(self, *, persist: bool) -> None:

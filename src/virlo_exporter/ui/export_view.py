@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication,
@@ -40,7 +41,33 @@ BLOCK_PALETTE = {
     "cancelled": ("#15181D", "#3B4655"),
 }
 
+# Status-box text/state per terminal status -- the single place a stage's
+# outcome is shown, replacing the old separately-placed checkmark/icon.
+STATUS_BOX_TEXT = {
+    "complete": "✓",
+    "warning": "!",
+    "failed": "×",
+    "skipped": "⊘",
+    "cancelled": "⊘",
+}
+STATUS_BOX_STATE = {
+    "complete": "complete",
+    "warning": "warning",
+    "failed": "failed",
+    "skipped": "neutral",
+    "cancelled": "neutral",
+}
+
+SPINNER_FRAMES = ["◜", "◠", "◝", "◞", "◡", "◟"]
+
 PROGRESS_COLOR = QColor("#22C55E")
+
+# How many pages make up one visual chunk of a long paginated stage (e.g.
+# Videos). Purely a display grouping -- backend retrieval is unchanged and
+# never fetches or waits differently because of this constant.
+PAGES_PER_CHUNK = 20
+
+_PAGE_COUNT_PATTERN = re.compile(r"(\d+)\s+page\(s\)")
 
 
 def _muted(text: str) -> QLabel:
@@ -50,22 +77,56 @@ def _muted(text: str) -> QLabel:
     return label
 
 
+def stroke_partial_path(painter: QPainter, path: QPainterPath, t0: float, t1: float) -> None:
+    """Stroke the [t0, t1] fraction of `path`'s perimeter. Shared by
+    StageBlock's progress border and the sidebar's Active Process perimeter
+    animation so both read as the same visual language."""
+    if t1 <= t0:
+        return
+    samples = max(2, int((t1 - t0) * 90))
+    polygon = QPolygonF()
+    for index in range(samples + 1):
+        t = t0 + (t1 - t0) * index / samples
+        polygon.append(path.pointAtPercent(min(1.0, max(0.0, t))))
+    painter.drawPolyline(polygon)
+
+
+def stroke_indeterminate_segment(
+    painter: QPainter, path: QPainterPath, offset: float, segment: float = 0.16
+) -> None:
+    """Draw a single moving segment along `path`'s perimeter at `offset`,
+    wrapping around the start when it would run past the end."""
+    start = offset
+    end = start + segment
+    if end <= 1.0:
+        stroke_partial_path(painter, path, start, end)
+    else:
+        stroke_partial_path(painter, path, start, 1.0)
+        stroke_partial_path(painter, path, 0.0, end - 1.0)
+
+
 class StageBlock(QFrame):
     """A single compact stage box in the export snake. Paints its own
     perimeter progress border rather than using a stylesheet border, since
-    the border itself carries live progress information."""
+    the border itself carries live progress information. A small square
+    status box floats over the bottom-right corner -- the single place a
+    percent, spinner, checkmark, warning, or failure icon is ever shown."""
 
     WIDTH = 176
     HEIGHT = 104
+    STATUS_BOX_SIZE = 26
+    STATUS_BOX_MARGIN = 8
 
-    def __init__(self, stage: str, label: str) -> None:
+    def __init__(self, stage: str, label: str, *, page_range: tuple[int, int] | None = None) -> None:
         super().__init__()
         self.stage = stage
+        self.page_range = page_range
         self.setFixedSize(self.WIDTH, self.HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._status = "running"
         self._percent: float | None = None
         self._offset = 0.0
+        self._spinner_frame = 0
         self._progress_text = ""
         self._watchdog = StallWatchdog()
         self._timer = QTimer(self)
@@ -80,19 +141,61 @@ class StageBlock(QFrame):
         self.title_label = QLabel(label.upper())
         self.title_label.setObjectName("stageBlockTitle")
         self.title_label.setWordWrap(True)
-        self.percent_label = QLabel("")
-        self.percent_label.setObjectName("stageBlockPercent")
+        layout.addWidget(self.title_label)
+        self.range_label = QLabel("")
+        self.range_label.setObjectName("stageBlockRange")
+        self.range_label.setVisible(False)
+        layout.addWidget(self.range_label)
+        if page_range is not None:
+            self.set_page_range(page_range)
+        layout.addStretch()
         self.detail_label = QLabel("")
         self.detail_label.setObjectName("stageBlockDetail")
         self.detail_label.setWordWrap(True)
-        layout.addWidget(self.title_label)
-        layout.addStretch()
-        layout.addWidget(self.percent_label)
         layout.addWidget(self.detail_label)
+
+        self.status_box = QLabel("", self)
+        self.status_box.setObjectName("stageStatusBox")
+        self.status_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_box.setProperty("state", "running")
+        self.status_box.setGeometry(
+            self.WIDTH - self.STATUS_BOX_MARGIN - self.STATUS_BOX_SIZE,
+            self.HEIGHT - self.STATUS_BOX_MARGIN - self.STATUS_BOX_SIZE,
+            self.STATUS_BOX_SIZE,
+            self.STATUS_BOX_SIZE,
+        )
+        self.status_box.raise_()
+
+    def set_title(self, label: str) -> None:
+        self.title_label.setText(label.upper())
+
+    def set_page_range(self, page_range: tuple[int, int] | None) -> None:
+        """A block can start out unchunked (its first event is always a
+        page-less "running" transition, before pagination has reported a
+        page number) and only later turn out to be page 1 of a chunk --
+        this lets the timeline retarget it once that's known, rather than
+        needing to know upfront whether a stage will end up chunked."""
+        self.page_range = page_range
+        if page_range is not None:
+            self.range_label.setText(f"Pages {page_range[0]}–{page_range[1]}")
+            self.range_label.setVisible(True)
+        else:
+            self.range_label.setVisible(False)
 
     def _advance(self) -> None:
         self._offset = (self._offset + 0.015) % 1.0
+        if self._percent is None:
+            self._spinner_frame = (self._spinner_frame + 1) % len(SPINNER_FRAMES)
+            self.status_box.setText(SPINNER_FRAMES[self._spinner_frame])
         self.update()
+
+    def _chunk_percent(self, page: int) -> float | None:
+        if self.page_range is None:
+            return None
+        start, end = self.page_range
+        span = max(1, end - start + 1)
+        within = max(1, min(page - start + 1, span))
+        return min(99.0, within * 100 / span)
 
     def apply(self, event: dict[str, Any]) -> None:
         status = str(event.get("status", "running"))
@@ -106,8 +209,19 @@ class StageBlock(QFrame):
                 self._watchdog_timer.start(5000)
             current = event.get("current")
             total = event.get("total")
+            page = event.get("page")
             message = event.get("message")
-            if isinstance(current, int) and isinstance(total, int) and total > 0:
+            chunk_percent = self._chunk_percent(page) if isinstance(page, int) else None
+            if chunk_percent is not None:
+                # A chunk's own percent tracks its position within its own
+                # page range -- the stage's overall current/total (record
+                # counts for the *whole* resource) would be identical across
+                # every chunk block and wouldn't mean "this chunk is done".
+                self._percent = max(self._percent or 0.0, chunk_percent)
+                self._progress_text = f"Page {page}"
+                if isinstance(current, int):
+                    self._progress_text = f"{self._progress_text} · {current:,} records"
+            elif isinstance(current, int) and isinstance(total, int) and total > 0:
                 # `total` can be an early, unreliable estimate: some stages
                 # discover more pages as they go (total grows -- current/total
                 # would otherwise dip backward) and some estimates start too
@@ -118,16 +232,15 @@ class StageBlock(QFrame):
                 # no matter how `total` itself moves between events.
                 raw_percent = min(99.0, current * 100 / total)
                 self._percent = max(self._percent or 0.0, raw_percent)
-                self.percent_label.setText(f"{self._percent:.0f}%")
                 self._progress_text = f"{current:,} / {total:,}"
-                self._timer.stop()
             else:
                 self._percent = None
-                self.percent_label.setText("")
                 self._progress_text = f"{current:,} records" if isinstance(current, int) else "Running"
-                if not self._timer.isActive():
-                    self._timer.start(50)
-            if message:
+            if self._percent is not None:
+                self._timer.stop()
+            elif not self._timer.isActive():
+                self._timer.start(50)
+            if message and chunk_percent is None:
                 self._progress_text = (
                     f"{self._progress_text}\n{message}" if self._progress_text else str(message)
                 )
@@ -135,10 +248,22 @@ class StageBlock(QFrame):
         else:
             self._timer.stop()
             self._watchdog_timer.stop()
-            self.percent_label.setText(STAGE_ICONS.get(status, ""))
             summary = event.get("summary")
             self.detail_label.setText(str(summary) if summary else status.replace("_", " ").title())
+        self._update_status_box()
         self.update()
+
+    def _update_status_box(self) -> None:
+        if self._status == "running":
+            state = "running"
+            text = f"{self._percent:.0f}%" if self._percent is not None else SPINNER_FRAMES[self._spinner_frame]
+        else:
+            state = STATUS_BOX_STATE.get(self._status, "neutral")
+            text = STATUS_BOX_TEXT.get(self._status, STAGE_ICONS.get(self._status, ""))
+        self.status_box.setText(text)
+        self.status_box.setProperty("state", state)
+        self.status_box.style().unpolish(self.status_box)
+        self.status_box.style().polish(self.status_box)
 
     def _check_stall(self) -> None:
         if self._status != "running":
@@ -160,35 +285,16 @@ class StageBlock(QFrame):
             return
         path = QPainterPath()
         path.addRoundedRect(rect, 10, 10)
-        total_length = path.length()
-        if total_length <= 0:
+        if path.length() <= 0:
             return
         pen = QPen(PROGRESS_COLOR, 3.5)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         if self._percent is not None:
-            self._stroke_partial(painter, path, 0.0, self._percent / 100)
+            stroke_partial_path(painter, path, 0.0, self._percent / 100)
         else:
-            segment = 0.16
-            start = self._offset
-            end = start + segment
-            if end <= 1.0:
-                self._stroke_partial(painter, path, start, end)
-            else:
-                self._stroke_partial(painter, path, start, 1.0)
-                self._stroke_partial(painter, path, 0.0, end - 1.0)
-
-    @staticmethod
-    def _stroke_partial(painter: QPainter, path: QPainterPath, t0: float, t1: float) -> None:
-        if t1 <= t0:
-            return
-        samples = max(2, int((t1 - t0) * 90))
-        polygon = QPolygonF()
-        for index in range(samples + 1):
-            t = t0 + (t1 - t0) * index / samples
-            polygon.append(path.pointAtPercent(min(1.0, max(0.0, t))))
-        painter.drawPolyline(polygon)
+            stroke_indeterminate_segment(painter, path, self._offset)
 
 
 class SnakeLayout(QLayout):
@@ -199,6 +305,7 @@ class SnakeLayout(QLayout):
     def __init__(self, parent: QWidget | None = None, spacing: int = 16) -> None:
         super().__init__(parent)
         self._items: list[Any] = []
+        self._last_rows: list[list[QWidget]] = []
         self.setContentsMargins(0, 0, 0, 0)
         self.setSpacing(spacing)
 
@@ -231,8 +338,6 @@ class SnakeLayout(QLayout):
         return self.minimumSize()
 
     def minimumSize(self) -> Any:
-        from PySide6.QtCore import QSize
-
         if not self._items:
             return QSize(0, 0)
         item_size = self._items[0].sizeHint()
@@ -242,11 +347,20 @@ class SnakeLayout(QLayout):
             item_size.height() + margins.top() + margins.bottom(),
         )
 
+    def rows_in_display_order(self) -> list[list[QWidget]]:
+        """The blocks grouped into rows, in the exact left-to-right order
+        they were actually placed on screen (already reversed for odd
+        rows) -- used by SnakeCanvas to draw connector arrows between
+        geometrically (and sequentially) adjacent blocks."""
+        return self._last_rows
+
     def _do_layout(self, rect: QRect, *, test_only: bool) -> int:
         left, top, right, bottom = self.getContentsMargins()
         area = rect.adjusted(left, top, -right, -bottom)
         spacing = self.spacing()
         if not self._items:
+            if not test_only:
+                self._last_rows = []
             return top + bottom
         block_size = self._items[0].sizeHint()
         block_w, block_h = block_size.width(), block_size.height()
@@ -257,6 +371,7 @@ class SnakeLayout(QLayout):
             rows.append(self._items[index : index + columns])
 
         y = area.y()
+        display_rows: list[list[QWidget]] = []
         for row_index, row_items in enumerate(rows):
             reversed_row = row_index % 2 == 1
             ordered = list(reversed(row_items)) if reversed_row else row_items
@@ -266,12 +381,103 @@ class SnakeLayout(QLayout):
                 else area.x()
             )
             x = start_x
+            display_row: list[QWidget] = []
             for item in ordered:
                 if not test_only:
                     item.setGeometry(QRect(QPoint(int(x), int(y)), block_size))
+                display_row.append(item.widget())
                 x += block_w + spacing
+            display_rows.append(display_row)
             y += block_h + spacing
+        if not test_only:
+            self._last_rows = display_rows
         return int(y - rect.y() + bottom - spacing)
+
+
+CONNECTOR_COLOR = QColor("#4B5563")
+
+
+def _draw_horizontal_arrowhead(painter: QPainter, x: int, y: int, *, pointing_right: bool) -> None:
+    size = 4
+    if pointing_right:
+        points = [QPointF(x, y), QPointF(x - size * 2, y - size), QPointF(x - size * 2, y + size)]
+    else:
+        points = [QPointF(x, y), QPointF(x + size * 2, y - size), QPointF(x + size * 2, y + size)]
+    painter.drawPolygon(QPolygonF(points))
+
+
+def _draw_down_arrowhead(painter: QPainter, x: int, y: int) -> None:
+    size = 4
+    points = [QPointF(x, y), QPointF(x - size, y - size * 2), QPointF(x + size, y - size * 2)]
+    painter.drawPolygon(QPolygonF(points))
+
+
+class SnakeCanvas(QWidget):
+    """Hosts the SnakeLayout and paints light connector arrows between
+    consecutive stage blocks, in sequence order -- drawn in the canvas's
+    own paintEvent, which Qt runs before it paints the child blocks on top,
+    so the arrows never sit over any block's text."""
+
+    def __init__(self, snake_layout: SnakeLayout) -> None:
+        super().__init__()
+        self.setLayout(snake_layout)
+        self._snake_layout = snake_layout
+
+    @staticmethod
+    def _sequence_first(display_row: list[QWidget], reversed_row: bool) -> QWidget:
+        return display_row[-1] if reversed_row else display_row[0]
+
+    @staticmethod
+    def _sequence_last(display_row: list[QWidget], reversed_row: bool) -> QWidget:
+        return display_row[0] if reversed_row else display_row[-1]
+
+    def paintEvent(self, event: Any) -> None:  # noqa: ARG002
+        rows = self._snake_layout.rows_in_display_order()
+        if not rows:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        line_pen = QPen(CONNECTOR_COLOR, 1.6)
+        line_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+
+        for row_index, row in enumerate(rows):
+            reversed_row = row_index % 2 == 1
+            for left_widget, right_widget in zip(row, row[1:], strict=False):
+                a_rect, b_rect = left_widget.geometry(), right_widget.geometry()
+                y = a_rect.center().y()
+                x0, x1 = a_rect.right(), b_rect.left()
+                if x1 <= x0:
+                    continue
+                arrow_len = 10
+                painter.setPen(line_pen)
+                painter.setBrush(CONNECTOR_COLOR)
+                if reversed_row:
+                    painter.drawLine(x0 + arrow_len, y, x1, y)
+                    _draw_horizontal_arrowhead(painter, x0, y, pointing_right=False)
+                else:
+                    painter.drawLine(x0, y, x1 - arrow_len, y)
+                    _draw_horizontal_arrowhead(painter, x1, y, pointing_right=True)
+
+            if row_index + 1 >= len(rows) or not row or not rows[row_index + 1]:
+                continue
+            next_row = rows[row_index + 1]
+            next_reversed = (row_index + 1) % 2 == 1
+            from_widget = self._sequence_last(row, reversed_row)
+            to_widget = self._sequence_first(next_row, next_reversed)
+            from_rect, to_rect = from_widget.geometry(), to_widget.geometry()
+            x0, y0 = from_rect.center().x(), from_rect.bottom()
+            x1, y1 = to_rect.center().x(), to_rect.top()
+            arrow_len = 8
+            painter.setPen(line_pen)
+            painter.setBrush(CONNECTOR_COLOR)
+            if x0 == x1:
+                painter.drawLine(x0, y0, x1, y1 - arrow_len)
+            else:
+                mid_y = (y0 + y1) // 2
+                painter.drawLine(x0, y0, x0, mid_y)
+                painter.drawLine(x0, mid_y, x1, mid_y)
+                painter.drawLine(x1, mid_y, x1, y1 - arrow_len)
+            _draw_down_arrowhead(painter, x1, y1)
 
 
 class ExportTimelineWidget(QWidget):
@@ -285,6 +491,7 @@ class ExportTimelineWidget(QWidget):
         self._live = live
         self._blocks: dict[str, StageBlock] = {}
         self._order: list[str] = []
+        self._split_stages: set[str] = set()
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
@@ -312,8 +519,8 @@ class ExportTimelineWidget(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._snake_host = QWidget()
-        self._snake_layout = SnakeLayout(self._snake_host)
+        self._snake_layout = SnakeLayout()
+        self._snake_host = SnakeCanvas(self._snake_layout)
         scroll.setWidget(self._snake_host)
         root.addWidget(scroll, 1)
 
@@ -390,24 +597,90 @@ class ExportTimelineWidget(QWidget):
             self.cancel_button.setVisible(state == "running")
 
     def stage_order(self) -> list[str]:
-        """Stages in the order their blocks appeared -- used by tests."""
+        """Stages/chunks in the order their blocks appeared -- used by
+        tests. A chunked stage contributes one entry per chunk key
+        (e.g. "videos:1", "videos:2")."""
         return list(self._order)
 
+    def _chunk_keys_for(self, stage: str) -> list[str]:
+        return [key for key in self._order if key == stage or key.startswith(f"{stage}:")]
+
     def stage_status(self, stage: str) -> str | None:
-        block = self._blocks.get(stage)
+        keys = self._chunk_keys_for(stage)
+        block = self._blocks.get(keys[-1]) if keys else None
         return block._status if block else None  # noqa: SLF001 - test/inspection accessor
+
+    def _page_range_for_chunk(self, chunk: int) -> tuple[int, int]:
+        start = (chunk - 1) * PAGES_PER_CHUNK + 1
+        return start, chunk * PAGES_PER_CHUNK
+
+    def _rekey_block(self, old_key: str, new_key: str) -> None:
+        block = self._blocks.pop(old_key)
+        self._blocks[new_key] = block
+        self._order[self._order.index(old_key)] = new_key
+        block.stage = new_key
+
+    def _running_block_key_and_label(self, stage: str, label: str, page: int | None) -> tuple[str, str, tuple[int, int] | None]:
+        if page is None:
+            return stage, label, None
+        chunk = (page - 1) // PAGES_PER_CHUNK + 1
+        key = f"{stage}:{chunk}"
+        if key not in self._blocks:
+            if chunk == 1 and stage in self._blocks:
+                # A paginated stage's very first event is always the
+                # page-less "running" transition (pagination hasn't reported
+                # a page number yet) -- adopt that existing block as chunk 1
+                # instead of creating a second, duplicate block.
+                self._rekey_block(stage, key)
+                self._blocks[key].set_page_range(self._page_range_for_chunk(1))
+            elif chunk > 1:
+                # A new chunk starting means the previous one is done -- by
+                # construction its PAGES_PER_CHUNK pages were already
+                # consumed. Future chunks are never pre-created; this is the
+                # only place a new chunk key is minted, and only once its
+                # first page starts.
+                previous_block = self._blocks.get(f"{stage}:{chunk - 1}")
+                if previous_block is not None and previous_block._status == "running":  # noqa: SLF001
+                    previous_block.apply({"status": "complete"})
+                if stage not in self._split_stages:
+                    self._split_stages.add(stage)
+                    if previous_block is not None:
+                        previous_block.set_title(f"{label} 1")
+        display_label = f"{label} {chunk}" if stage in self._split_stages else label
+        page_range = self._page_range_for_chunk(chunk)
+        return key, display_label, page_range
 
     def apply_event(self, event: dict[str, Any]) -> None:
         stage = str(event.get("stage"))
-        block = self._blocks.get(stage)
-        if block is None:
-            block = StageBlock(stage, str(event.get("label", stage)))
-            self._blocks[stage] = block
-            self._order.append(stage)
-            self._snake_layout.addWidget(block)
-        block.apply(event)
-
+        label = str(event.get("label", stage))
         status = str(event.get("status", "running"))
+        page = event.get("page") if status == "running" and isinstance(event.get("page"), int) else None
+
+        if status == "running":
+            key, display_label, page_range = self._running_block_key_and_label(stage, label, page)
+        else:
+            # A terminal event always names the whole (possibly chunked)
+            # resource, never a specific chunk -- route it to whichever
+            # chunk is currently the latest for this stage.
+            existing = self._chunk_keys_for(stage)
+            key = existing[-1] if existing else stage
+            page_range = self._blocks[key].page_range if key in self._blocks else None
+            if stage in self._split_stages and ":" in key:
+                display_label = f"{label} {key.rsplit(':', 1)[1]}"
+            else:
+                display_label = label
+
+        block = self._blocks.get(key)
+        if block is None:
+            block = StageBlock(key, display_label, page_range=page_range)
+            self._blocks[key] = block
+            self._order.append(key)
+            self._snake_layout.addWidget(block)
+        # The block re-derives its own title from event["label"] on every
+        # apply() -- pass the chunk-numbered label through so "VIDEOS 2"
+        # doesn't get silently overwritten back to plain "VIDEOS".
+        block.apply({**event, "page": page, "label": display_label})
+
         if status == "failed":
             self._failure_summary.setText(
                 f"{block.title_label.text().title()}: {event.get('summary') or 'This stage failed.'}"
@@ -420,10 +693,32 @@ class ExportTimelineWidget(QWidget):
 
     def load_history(self, rows: list[dict[str, Any]]) -> None:
         for record in rows:
+            stage = record.get("stage")
+            label = record.get("label")
+            summary = record.get("summary") or ""
+            match = _PAGE_COUNT_PATTERN.search(summary)
+            page_count = int(match.group(1)) if match else None
+            if page_count and page_count > PAGES_PER_CHUNK:
+                # Page-level progress is never persisted (it's UI-only, and
+                # export_stages only stores stage start/finish rows), but the
+                # finished page count survives inside the plain "N page(s)"
+                # summary text -- reconstruct every chunk this stage would
+                # have passed through (each already complete) from that,
+                # rather than replaying the live process.
+                total_chunks = (page_count - 1) // PAGES_PER_CHUNK + 1
+                for chunk in range(1, total_chunks + 1):
+                    self.apply_event(
+                        {
+                            "stage": stage,
+                            "label": label,
+                            "status": "running",
+                            "page": min(chunk * PAGES_PER_CHUNK, page_count),
+                        }
+                    )
             self.apply_event(
                 {
-                    "stage": record.get("stage"),
-                    "label": record.get("label"),
+                    "stage": stage,
+                    "label": label,
                     "status": record.get("status"),
                     "summary": record.get("summary"),
                     "detail": record.get("detail"),

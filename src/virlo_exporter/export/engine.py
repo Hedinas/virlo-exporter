@@ -85,12 +85,17 @@ class ExportEngine:
         self._tracker: StageTracker | None = None
 
     def _check_progress(
-        self, current: int, total: int | None, message: str | None = None
+        self,
+        current: int,
+        total: int | None,
+        message: str | None = None,
+        *,
+        page: int | None = None,
     ) -> None:
         if self.cancel_event.is_set():
             raise ExportCancelled()
         if self._tracker:
-            self._tracker.update(current=current, total=total, message=message)
+            self._tracker.update(current=current, total=total, message=message, page=page)
 
     @staticmethod
     def _write_json(path: Path, value: Any) -> None:
@@ -212,7 +217,9 @@ class ExportEngine:
                         def on_page(
                             page: int, count_so_far: int, expected_total: int | None
                         ) -> None:
-                            self._check_progress(count_so_far, expected_total, f"Page {page}")
+                            self._check_progress(
+                                count_so_far, expected_total, f"Page {page}", page=page
+                            )
 
                         result = self.client.get_resource(
                             agent_id,
