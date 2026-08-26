@@ -82,9 +82,18 @@ def select_high_signal(
     for platform_videos in by_platform.values():
         ranked = sorted(
             platform_videos,
+            # video_identity() as a tie-breaker makes the cutoff at
+            # top_per_platform deterministic regardless of input order --
+            # without it, two videos genuinely tied on (score, views) could
+            # fall on either side of the cutoff depending on which order
+            # the API happened to return pages in on a given fetch (proven:
+            # the API's own pagination order across separate fetches is not
+            # guaranteed stable -- Paginator's repeated-page guard exists
+            # precisely because it sometimes isn't).
             key=lambda item: (
                 _metric(item, "virality_score") or _metric(item, "outlier_score"),
                 _metric(item, "views"),
+                video_identity(item),
             ),
             reverse=True,
         )
@@ -98,7 +107,11 @@ def select_high_signal(
         record = deepcopy(by_id[key])
         record["_selection"] = {"reasons": sorted(selection_reasons)}
         selected.append(record)
-    selected.sort(key=lambda item: _metric(item, "views"), reverse=True)
+    # video_identity() as a tie-breaker: `reasons` iterates in whatever
+    # order videos were first found (itself input-order-dependent), so
+    # without this two videos tied on views could swap positions in the
+    # output between two builds of the same underlying data.
+    selected.sort(key=lambda item: (_metric(item, "views"), video_identity(item)), reverse=True)
     return selected, sorted(unresolved)
 
 
@@ -110,7 +123,11 @@ def deterministic_baseline(
     excluded = {video_identity(video) for video in selected}
     candidates = [video for video in videos if video_identity(video) not in excluded]
     if len(candidates) <= sample_size:
-        return candidates
+        # Every candidate is included -- but still sort deterministically by
+        # id rather than returning raw input order, which varies with
+        # whatever order the API happened to return pages in on a given
+        # fetch (proven unstable for some resources; see determinism audit).
+        return sorted(candidates, key=video_identity)
 
     strata: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
     views_sorted = sorted(_metric(video, "views") for video in candidates)
