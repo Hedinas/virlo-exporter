@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, Signal
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from virlo_exporter.export.watchdog import StallWatchdog
 
 STAGE_ICONS = {
     "running": "",
@@ -63,8 +66,13 @@ class StageBlock(QFrame):
         self._status = "running"
         self._percent: float | None = None
         self._offset = 0.0
+        self._progress_text = ""
+        self._watchdog = StallWatchdog()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._advance)
+        self._watchdog_timer = QTimer(self)
+        self._watchdog_timer.timeout.connect(self._check_stall)
+        self._watchdog_timer.start(5000)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 10)
@@ -93,32 +101,41 @@ class StageBlock(QFrame):
             self.title_label.setText(str(label).upper())
 
         if status == "running":
+            self._watchdog.record_progress(time.time())
+            if not self._watchdog_timer.isActive():
+                self._watchdog_timer.start(5000)
             current = event.get("current")
             total = event.get("total")
             message = event.get("message")
             if isinstance(current, int) and isinstance(total, int) and total > 0:
                 self._percent = min(100.0, current * 100 / total)
                 self.percent_label.setText(f"{self._percent:.0f}%")
-                self.detail_label.setText(f"{current:,} / {total:,}")
+                self._progress_text = f"{current:,} / {total:,}"
                 self._timer.stop()
             else:
                 self._percent = None
                 self.percent_label.setText("")
-                self.detail_label.setText(
-                    f"{current:,} records" if isinstance(current, int) else "Running"
-                )
+                self._progress_text = f"{current:,} records" if isinstance(current, int) else "Running"
                 if not self._timer.isActive():
                     self._timer.start(50)
             if message:
-                self.detail_label.setText(
-                    f"{self.detail_label.text()}\n{message}" if self.detail_label.text() else str(message)
+                self._progress_text = (
+                    f"{self._progress_text}\n{message}" if self._progress_text else str(message)
                 )
+            self.detail_label.setText(self._progress_text)
         else:
             self._timer.stop()
+            self._watchdog_timer.stop()
             self.percent_label.setText(STAGE_ICONS.get(status, ""))
             summary = event.get("summary")
             self.detail_label.setText(str(summary) if summary else status.replace("_", " ").title())
         self.update()
+
+    def _check_stall(self) -> None:
+        if self._status != "running":
+            return
+        message = self._watchdog.status_message(time.time())
+        self.detail_label.setText(message if message else self._progress_text)
 
     def paintEvent(self, event: Any) -> None:  # noqa: ARG002
         painter = QPainter(self)
