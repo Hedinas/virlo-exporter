@@ -66,6 +66,9 @@ def build_report(
             )
         return cleaned
 
+    from .validator import has_actionable_report
+
+    status = str(export_row.get("status") or "")
     return {
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "export": {
@@ -75,6 +78,7 @@ def build_report(
             "status": export_row.get("status"),
             "started_at": export_row.get("started_at"),
             "completed_at": export_row.get("completed_at"),
+            "duration_ms": _duration_ms(export_row.get("started_at"), export_row.get("completed_at")),
         },
         "summary": summary or {},
         "warnings": clean(warnings),
@@ -82,7 +86,10 @@ def build_report(
         "notices": clean(notices),
         "deduplications": clean(deduplications),
         "stages": stage_entries,
-        "validation": {"validation_state": export_row.get("validation_state")},
+        "validation": {
+            "validation_state": export_row.get("validation_state"),
+            "has_actionable_report": has_actionable_report(status),
+        },
     }
 
 

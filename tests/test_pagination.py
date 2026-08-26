@@ -155,3 +155,46 @@ def test_duplicate_ids_are_skipped_with_warning() -> None:
     result = Paginator(limit=2).collect(fetch, "agents")
     assert len(result.records) == 2
     assert result.warnings
+
+
+def test_records_without_id_or_run_id_are_never_deduped_without_an_identity_fallback() -> None:
+    # Reproduces a real bug found against production data: hashtags and
+    # hooks carry neither "id" nor "run_id", so without a resource-specific
+    # identity fallback every duplicate record is silently kept -- one real
+    # export had 1,952 of 7,506 hashtag records be exact duplicates.
+    def fetch(query: dict[str, int]) -> dict:
+        page = query["page"]
+        rows = [{"hashtag": "decor"}, {"hashtag": "decor"}] if page == 1 else []
+        return {"data": {"hashtags": rows, "count": len(rows), "limit": 2, "page": page}}
+
+    result = Paginator(limit=2).collect(fetch, "hashtags")
+    assert len(result.records) == 2  # both kept -- no fallback identity supplied
+    assert not result.warnings
+
+
+def test_identity_fallback_dedupes_records_lacking_id_or_run_id() -> None:
+    def fetch(query: dict[str, int]) -> dict:
+        page = query["page"]
+        rows = [{"hashtag": "decor"}, {"hashtag": "decor"}] if page == 1 else []
+        return {"data": {"hashtags": rows, "count": len(rows), "limit": 2, "page": page}}
+
+    result = Paginator(limit=2).collect(
+        fetch, "hashtags", identity=lambda record: record.get("hashtag")
+    )
+    assert len(result.records) == 1
+    assert "Duplicate hashtags id skipped: decor" in result.warnings[0]
+
+
+def test_identity_fallback_is_only_used_when_id_and_run_id_are_absent() -> None:
+    # A record that DOES carry a real id must keep using that id, never the
+    # fallback identity -- the fallback is strictly for resources with no
+    # natural identifier of their own.
+    def fetch(query: dict[str, int]) -> dict:
+        page = query["page"]
+        rows = [{"id": "a", "hashtag": "decor"}, {"id": "b", "hashtag": "decor"}] if page == 1 else []
+        return {"data": {"hashtags": rows, "count": len(rows), "limit": 2, "page": page}}
+
+    result = Paginator(limit=2).collect(
+        fetch, "hashtags", identity=lambda record: record.get("hashtag")
+    )
+    assert len(result.records) == 2  # distinct real ids, same fallback key -- both kept

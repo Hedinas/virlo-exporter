@@ -46,6 +46,29 @@ def test_get_resource_never_sends_offset_param(resource: str, path_suffix: str) 
         assert params.get("page") is not None
 
 
+@pytest.mark.parametrize(
+    ("resource", "duplicate_record"),
+    [
+        ("hashtags", {"hashtag": "decor", "video_count": 27}),
+        ("hooks", {"hook_text": "Cute gift idea", "video": {"id": "v1"}}),
+    ],
+)
+def test_get_resource_dedupes_records_with_no_natural_id(resource: str, duplicate_record: dict) -> None:
+    # Regression test for a real bug found against production data: hashtags
+    # and hooks carry neither "id" nor "run_id", so Paginator's own
+    # duplicate-id detection was blind to them -- one real export had 1,952
+    # of 7,506 hashtags and 273 of 862 hooks be exact-duplicate records.
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page")
+        rows = [duplicate_record, dict(duplicate_record)] if page == "1" else []
+        return httpx.Response(200, json={"data": {resource: rows, "count": len(rows), "limit": 100, "page": 1}})
+
+    client = VirloClient("virlo_tkn_test", transport=httpx.MockTransport(handler))
+    result = client.get_resource("agent-1", resource, data_intelligence_enabled=True)
+    assert len(result.records) == 1
+    assert result.warnings
+
+
 def test_402_is_not_retried() -> None:
     calls = 0
 

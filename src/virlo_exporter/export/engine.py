@@ -23,6 +23,7 @@ from .dataset import count_platforms, deterministic_baseline, select_high_signal
 from .diagnostics import classify_pagination_warnings
 from .report import build_report, write_report
 from .timeline import StageTracker
+from .validator import reconcile_raw_and_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +289,14 @@ class ExportEngine:
                     log_lines.append(f"WARN {resource}: {type(exc).__name__}: {exc}")
                     tracker.finish("warning", summary="Optional resource unavailable", detail=detail)
 
+            # All the remaining work (selection, dataset assembly, writing
+            # the final JSON files) is CPU/filesystem-only with no further
+            # network round-trips to naturally interleave a cancellation
+            # check with -- check once explicitly here so a cancel clicked
+            # right as the last resource finished doesn't fall through to a
+            # fully-written "complete" export instead.
+            if self.cancel_event.is_set():
+                raise ExportCancelled()
             tracker.start("selection", "Selecting high-signal and baseline videos")
             videos = resources.get("videos", [])
             high_signal, unresolved = select_high_signal(videos, resources)
@@ -637,4 +646,8 @@ class ExportEngine:
             warnings.append("Less than 10 MB of disk space remains after export.")
         if resources.get("videos") and not dataset.get("high_signal_videos"):
             warnings.append("Videos were retrieved but none met the high-signal selection rules.")
+        # RAW<->dataset reconciliation: every selected/baseline video ID the
+        # dataset claims must actually exist in the RAW videos it was built
+        # from, with no accidental overlap or internal duplication.
+        warnings.extend(reconcile_raw_and_dataset(resources.get("videos", []), dataset))
         return warnings

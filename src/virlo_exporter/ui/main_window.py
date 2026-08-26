@@ -44,6 +44,7 @@ from virlo_exporter.api.errors import (
 from virlo_exporter.config import AppSettings, SettingsStore
 from virlo_exporter.export import report as export_report
 from virlo_exporter.export.engine import ExportEngine, ExportResult
+from virlo_exporter.export.validator import has_actionable_report
 from virlo_exporter.models import Agent, Run
 from virlo_exporter.services.workers import Worker
 from virlo_exporter.storage.database import Database
@@ -1728,7 +1729,7 @@ class MainWindow(QMainWindow):
         top.addWidget(title)
         top.addStretch()
         badge = ClickableStatusBadge(display_status_text(status), state)
-        has_diagnostic_reason = status in {"failed", "cancelled", "complete_with_warnings"}
+        has_diagnostic_reason = has_actionable_report(status)
         if has_diagnostic_reason and not files_missing:
             badge.setToolTip("Click for diagnostic details")
             badge.clicked.connect(

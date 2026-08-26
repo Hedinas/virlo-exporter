@@ -22,6 +22,35 @@ from .pagination import PageResult, Paginator
 logger = logging.getLogger(__name__)
 
 
+def _hashtag_identity(record: dict[str, Any]) -> str | None:
+    value = record.get("hashtag")
+    return str(value) if value else None
+
+
+def _hook_identity(record: dict[str, Any]) -> str | None:
+    # A hook has no "id" of its own -- it's characterized by its text
+    # applied to a specific video. Confirmed against real data: the same
+    # (hook_text, video) pair recurs as an exact duplicate record, most
+    # likely once per matching search keyword.
+    video = record.get("video")
+    video_id = video.get("id") if isinstance(video, dict) else video
+    text = record.get("hook_text")
+    if text is None and video_id is None:
+        return None
+    return f"{text}|{video_id}"
+
+
+# Fallback dedup identity for resources whose records carry neither "id"
+# nor "run_id" -- without this, Paginator.collect()'s duplicate-record
+# detection is blind to them and silently keeps every duplicate. Confirmed
+# against real RAW data: hashtags and hooks are both affected (~29% and
+# ~32% exact-duplicate records respectively in one real export).
+RESOURCE_IDENTITY: dict[str, Callable[[dict[str, Any]], str | None]] = {
+    "hashtags": _hashtag_identity,
+    "hooks": _hook_identity,
+}
+
+
 class VirloClient:
     def __init__(
         self,
@@ -279,4 +308,6 @@ class VirloClient:
                 "GET", path, params=params, billing_class=BillingClass.FREE_READ
             )[0]
 
-        return paginator.collect(fetch, response_key, on_page=on_page)
+        return paginator.collect(
+            fetch, response_key, on_page=on_page, identity=RESOURCE_IDENTITY.get(resource)
+        )

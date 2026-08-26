@@ -31,7 +31,12 @@ class Paginator:
         resource: str,
         *,
         on_page: Callable[[int, int, int | None], None] | None = None,
+        identity: Callable[[dict[str, Any]], str | None] | None = None,
     ) -> PageResult:
+        """`identity` is a fallback dedup key for resources whose records
+        carry neither "id" nor "run_id" (e.g. hashtags, hooks) -- without
+        it, duplicate records for those resources are invisible to this
+        method's own duplicate-id detection and are silently kept."""
         all_records: list[dict[str, Any]] = []
         seen_pages: set[str] = set()
         seen_ids: set[str] = set()
@@ -81,6 +86,8 @@ class Paginator:
 
             for record in records:
                 identifier = record.get("id") or record.get("run_id")
+                if identifier is None and identity is not None:
+                    identifier = identity(record)
                 if identifier is not None:
                     key = str(identifier)
                     if key in seen_ids:
