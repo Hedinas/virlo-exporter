@@ -55,6 +55,7 @@ from virlo_exporter.utils.files import (
     reveal_in_explorer,
 )
 
+from . import icons
 from .components import (
     AgentEditorDialog,
     CollapsibleSection,
@@ -159,12 +160,20 @@ def mini_card(label_text: str, value_text: str, state: str = "neutral") -> QFram
     return frame
 
 
+ICON_BUTTON_SIZE = 16
+
+
 def icon_action_button(
-    icon_text: str, tooltip: str, callback: Any, *, enabled: bool = True
+    icon_name: str, tooltip: str, callback: Any, *, enabled: bool = True
 ) -> QToolButton:
+    """`icon_name` is one of the unified line-icon set (icons.py) -- pencil/
+    gear/copy/folder/workflow/document/trash/warning -- never raw emoji or
+    mixed Unicode glyphs, so every action icon shares the same stroke
+    weight, size, and theme-aware color."""
     button = QToolButton()
     button.setObjectName("iconAction")
-    button.setText(icon_text)
+    button.setIcon(icons.icon(icon_name))
+    button.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
     button.setToolTip(tooltip)
     button.setCursor(
         Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor
@@ -178,7 +187,7 @@ def icon_toolbar(actions: Any) -> QHBoxLayout:
     """A row of small centered icon buttons replacing the old three-dot
     overflow menu -- every action is visible and reachable in one click,
     with a tooltip standing in for a label. Each entry is either a plain
-    (icon_text, tooltip, callback) or a 4-tuple ending in enabled=False to
+    (icon_name, tooltip, callback) or a 4-tuple ending in enabled=False to
     show the action disabled with an explanatory tooltip rather than
     hiding it (e.g. Report with nothing to report)."""
     row = QHBoxLayout()
@@ -486,12 +495,14 @@ class AgentRow(QFrame):
         text.addWidget(secondary)
         pencil = QToolButton()
         pencil.setObjectName("pencilButton")
-        pencil.setText("✎")
+        pencil.setIcon(icons.icon("pencil"))
+        pencil.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
         pencil.setToolTip(f"Rename {agent.name}")
         pencil.clicked.connect(on_rename)
         gear = QToolButton()
         gear.setObjectName("gearButton")
-        gear.setText("⚙")
+        gear.setIcon(icons.icon("gear"))
+        gear.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
         gear.setToolTip(f"Edit {agent.name}")
         gear.clicked.connect(on_edit)
         layout.addLayout(text, 1)
@@ -537,7 +548,8 @@ class ResearchRow(QFrame):
         text.addWidget(date_label)
         pencil = QToolButton()
         pencil.setObjectName("pencilButton")
-        pencil.setText("✎")
+        pencil.setIcon(icons.icon("pencil"))
+        pencil.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
         pencil.setToolTip("Rename research")
         pencil.clicked.connect(on_rename)
         layout.addLayout(text, 1)
@@ -1363,11 +1375,11 @@ class MainWindow(QMainWindow):
         header.addLayout(
             icon_toolbar(
                 (
-                    ("✎", f"Rename {agent.name}", lambda: self.quick_rename_agent(agent)),
-                    ("⚙", "Edit agent settings", lambda: self.edit_agent(agent)),
-                    ("⧉", "Copy Agent ID", lambda: QApplication.clipboard().setText(agent.id)),
+                    ("pencil", f"Rename {agent.name}", lambda: self.quick_rename_agent(agent)),
+                    ("gear", "Edit agent settings", lambda: self.edit_agent(agent)),
+                    ("copy", "Copy Agent ID", lambda: QApplication.clipboard().setText(agent.id)),
                     (
-                        "📁",
+                        "folder",
                         "Open Export Folder",
                         lambda: open_in_explorer(Path(self.settings.export_folder)),
                     ),
@@ -1647,7 +1659,7 @@ class MainWindow(QMainWindow):
             actions = icon_toolbar(
                 (
                     (
-                        "▶",
+                        "workflow",
                         "View process",
                         lambda _=False, record=export_record: self.open_export_history(
                             agent, run, record
@@ -1658,7 +1670,7 @@ class MainWindow(QMainWindow):
             actions.addStretch()
             actions.addWidget(
                 icon_action_button(
-                    "🗑",
+                    "trash",
                     "Delete (moves to Recycle Bin)",
                     lambda _=False, record=export_record: self.delete_export_to_recycle_bin(
                         agent, run, record
@@ -1691,19 +1703,19 @@ class MainWindow(QMainWindow):
         actions = icon_toolbar(
             (
                 (
-                    "▶",
+                    "workflow",
                     "View process",
                     lambda _=False, record=export_record: self.open_export_history(
                         agent, run, record
                     ),
                 ),
                 (
-                    "📁",
+                    "folder",
                     "Open folder",
                     lambda _=False, path=export_record["path"]: open_in_explorer(Path(path)),
                 ),
                 (
-                    "📄",
+                    "document",
                     "Open report"
                     if has_diagnostic_reason
                     else "No diagnostic report issues for this export.",
@@ -1717,7 +1729,7 @@ class MainWindow(QMainWindow):
         actions.addStretch()
         actions.addWidget(
             icon_action_button(
-                "🗑",
+                "trash",
                 "Delete (moves to Recycle Bin)",
                 lambda _=False, record=export_record: self.delete_export_to_recycle_bin(
                     agent, run, record
@@ -1756,19 +1768,19 @@ class MainWindow(QMainWindow):
         title_row.addLayout(
             icon_toolbar(
                 (
-                    ("✎", "Rename research", lambda: self.rename_research(agent, run)),
+                    ("pencil", "Rename research", lambda: self.rename_research(agent, run)),
                     (
-                        "⧉",
+                        "copy",
                         "Copy Run ID",
                         lambda: QApplication.clipboard().setText(run.id),
                     ),
                     (
-                        "📁",
+                        "folder",
                         "Open Export Folder",
                         lambda: open_in_explorer(Path(self.settings.export_folder)),
                     ),
                     (
-                        "🗑",
+                        "trash",
                         "Hide from Virlo Exporter (local only)",
                         lambda: self.hide_research_locally(agent, run),
                     ),
