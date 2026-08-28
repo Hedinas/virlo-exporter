@@ -261,6 +261,102 @@ def test_research_run_card_is_bounded_width(tmp_path, qapp) -> None:
     assert card.maximumWidth() <= 520
 
 
+def test_ensure_report_path_handles_missing_path_without_crashing_or_opening_anything(
+    tmp_path, qapp, monkeypatch
+) -> None:
+    # _latest_export_record() returns {} when an export's DB row doesn't
+    # exist yet -- export_record["path"] used to KeyError; export_record
+    # with path="" used to silently resolve to the app's own cwd via
+    # Path(""). Neither may open anything -- both must degrade to a clear
+    # diagnostic instead.
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    errors: list[str] = []
+    opened: list[Path] = []
+    monkeypatch.setattr(
+        "virlo_exporter.ui.main_window.show_error",
+        lambda parent, title, message, technical="": errors.append(title),
+    )
+    monkeypatch.setattr("virlo_exporter.ui.main_window.open_in_explorer", lambda path: opened.append(path))
+
+    assert window._ensure_report_path(agent, {}) is None
+    assert window._ensure_report_path(agent, {"path": ""}) is None
+
+    assert opened == []
+    assert errors == ["No report available", "No report available"]
+
+
+def test_open_research_folder_uses_the_real_export_parent_not_the_flat_root(
+    tmp_path, qapp, monkeypatch
+) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    opened: list[Path] = []
+    monkeypatch.setattr("virlo_exporter.ui.main_window.open_in_explorer", lambda path: opened.append(path))
+
+    window._open_research_folder(agent, run)
+
+    assert opened == [export_dir.parent]  # Research_001, not the flat exports root
+    assert opened[0] != Path(window.settings.export_folder)
+
+
+def test_open_research_folder_reports_missing_folder_instead_of_opening_root(
+    tmp_path, qapp, monkeypatch
+) -> None:
+    import shutil
+
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    shutil.rmtree(export_dir.parent)  # the whole Research_001 folder is gone
+    opened: list[Path] = []
+    errors: list[str] = []
+    monkeypatch.setattr("virlo_exporter.ui.main_window.open_in_explorer", lambda path: opened.append(path))
+    monkeypatch.setattr(
+        "virlo_exporter.ui.main_window.show_error",
+        lambda parent, title, message, technical="": errors.append(title),
+    )
+
+    window._open_research_folder(agent, run)
+
+    assert opened == []
+    assert errors == ["No export folder yet"]
+
+
+def test_open_agent_folder_derives_from_a_real_export_two_levels_up(
+    tmp_path, qapp, monkeypatch
+) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    opened: list[Path] = []
+    monkeypatch.setattr("virlo_exporter.ui.main_window.open_in_explorer", lambda path: opened.append(path))
+
+    window._open_agent_folder(agent)
+
+    assert opened == [export_dir.parent.parent]  # the Agent-name folder, not the flat root
+
+
+def test_export_card_shows_high_signal_and_duration_for_a_complete_export(tmp_path, qapp) -> None:
+    from PySide6.QtWidgets import QLabel
+
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    report = report_module.build_report(
+        export_row={
+            "export_number": export_record["export_number"],
+            "research_number": 1,
+            "status": "complete",
+            "started_at": "2026-08-25T10:00:00+00:00",
+            "completed_at": "2026-08-25T10:02:30+00:00",
+        },
+        stages=[],
+        agent_name="Raxeko",
+        summary={"videos": 100, "warnings": 0, "paid_api_calls": 0, "high_signal_videos": 12},
+    )
+    report_module.write_report(export_dir, report)
+
+    card = window._export_card(agent, run, export_record)
+    labels = [label.text() for label in card.findChildren(QLabel)]
+    assert "HIGH SIGNAL" in labels  # metric_card labels render upper via micro_label()
+    assert "12" in labels
+    assert "DURATION" in labels
+    assert any("2m 30s" in text for text in labels)
+
+
 def test_corrupt_report_file_degrades_gracefully_instead_of_crashing(tmp_path, qapp) -> None:
     # Error-matrix case: a report file that exists but is not valid JSON
     # (e.g. truncated by an external disk issue, or hand-edited) must never

@@ -430,7 +430,11 @@ class ExportEngine:
                 )
             self.database.update_export(
                 export_id,
-                path=str(export_dir or provisional),
+                # An honest empty path when export_dir was never assigned
+                # (cancelled before the folder was created) -- never the
+                # `provisional` placeholder, which is never actually created
+                # on disk and would otherwise be stored as if it were real.
+                path=str(export_dir) if export_dir else "",
                 status="cancelled",
                 completed_at=datetime.now(UTC).isoformat(),
                 validation="incomplete",
@@ -470,7 +474,10 @@ class ExportEngine:
                     )
             self.database.update_export(
                 export_id,
-                path=str(export_dir or provisional),
+                # Same rationale as the ExportCancelled branch above: an
+                # honest empty path, never the never-created `provisional`
+                # placeholder.
+                path=str(export_dir) if export_dir else "",
                 status="failed",
                 completed_at=datetime.now(UTC).isoformat(),
                 validation="incomplete",

@@ -221,6 +221,25 @@ class ClickableStatusBadge(QLabel):
         super().mousePressEvent(event)
 
 
+class ClickableTitleLabel(QLabel):
+    """A title label that navigates on click -- e.g. a Research name in the
+    Agent's Research Runs list, which opens straight to that Research's
+    detail page without a separate sidebar selection step. Hover/visual
+    styling is driven by the same objectName-based QSS as any other title;
+    this only adds the click affordance."""
+
+    clicked = Signal()
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class ExportCompletionOverlay(QWidget):
     """A single in-window centered overlay, not a separate top-level QDialog
     -- a real QDialog carries its own OS window-chrome close button in
@@ -759,6 +778,8 @@ class MainWindow(QMainWindow):
         self.research_list = RowList()
         self.research_list.setObjectName("researchSidebarList")
         self.research_list.itemClicked.connect(self._research_selected)
+        self.research_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.research_list.customContextMenuRequested.connect(self._research_menu)
         self.research_section.body_layout.addWidget(self.research_search)
         self.research_section.body_layout.addWidget(self.research_list)
         side.addWidget(self.research_section)
@@ -1537,8 +1558,10 @@ class MainWindow(QMainWindow):
         number = run.local_number or 0
         display_name = self.database.research_display_name(agent.id, run.id)
         top = QHBoxLayout()
-        title = QLabel(display_name or f"Research #{number:03d}")
+        title = ClickableTitleLabel(display_name or f"Research #{number:03d}")
         title.setObjectName("cardTitle")
+        title.setToolTip("Open this Research")
+        title.clicked.connect(lambda: self.show_run(agent, run))
         top.addWidget(title)
         top.addWidget(
             icon_action_button("pencil", "Rename locally", lambda: self.rename_research(agent, run))
@@ -1565,8 +1588,8 @@ class MainWindow(QMainWindow):
                 ("workflow", "Open Research", lambda: self.show_run(agent, run)),
                 (
                     "folder",
-                    "Open Export Folder",
-                    lambda: open_in_explorer(Path(self.settings.export_folder)),
+                    "Open Research Folder",
+                    lambda: self._open_research_folder(agent, run),
                 ),
                 ("copy", "Copy Run ID", lambda: QApplication.clipboard().setText(run.id)),
                 ("trash", "Hide locally", lambda: self.hide_research_locally(agent, run)),
@@ -1628,8 +1651,22 @@ class MainWindow(QMainWindow):
         summary = cls._read_export_report_payload(export_dir).get("summary")
         return summary if isinstance(summary, dict) else {}
 
-    @staticmethod
-    def _export_duration_text(export_record: dict[str, Any]) -> str | None:
+    @classmethod
+    def _read_export_meta(cls, export_dir: str) -> dict[str, Any]:
+        meta = cls._read_export_report_payload(export_dir).get("export")
+        return meta if isinstance(meta, dict) else {}
+
+    @classmethod
+    def _export_duration_text(cls, export_record: dict[str, Any]) -> str | None:
+        # export.duration_ms in EXPORT_REPORT.json is the authoritative
+        # source (see export/report.py) -- prefer it over recomputing from
+        # the local DB's started_at/completed_at, which can be absent or
+        # diverge for interrupted/failed exports.
+        raw_path = export_record.get("path")
+        duration_ms = cls._read_export_meta(raw_path).get("duration_ms") if raw_path else None
+        if isinstance(duration_ms, int):
+            minutes, seconds = divmod(max(0, duration_ms // 1000), 60)
+            return f"{minutes}m {seconds:02d}s"
         started, completed = export_record.get("started_at"), export_record.get("completed_at")
         if not started or not completed:
             return None
@@ -1642,8 +1679,60 @@ class MainWindow(QMainWindow):
         minutes, seconds = divmod(seconds, 60)
         return f"{minutes}m {seconds:02d}s"
 
+    def _research_folder(self, agent: Agent, run: Run) -> Path | None:
+        """The folder containing every export for this Research (its
+        Research_NNN parent directory), derived from an actual export's own
+        on-disk `path` rather than recomputed from the Agent's current name
+        -- export folders are named from the Agent's name *at export time*,
+        which can drift after a rename (see edit_agent)."""
+        for record in self.database.export_history(agent.id, run.id):
+            raw_path = record.get("path")
+            if not raw_path:
+                continue
+            candidate = Path(raw_path).parent
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _open_research_folder(self, agent: Agent, run: Run) -> None:
+        folder = self._research_folder(agent, run)
+        if folder is None:
+            show_error(
+                self,
+                "No export folder yet",
+                "This research has no export folder on disk yet. Run an export first.",
+            )
+            return
+        open_in_explorer(folder)
+
+    def _open_agent_folder(self, agent: Agent) -> None:
+        for run in self.runs.get(agent.id, []):
+            folder = self._research_folder(agent, run)
+            if folder is not None:
+                open_in_explorer(folder.parent)
+                return
+        show_error(
+            self,
+            "No export folder yet",
+            "This agent has no export folder on disk yet. Run an export first.",
+        )
+
     def _ensure_report_path(self, agent: Agent, export_record: dict[str, Any]) -> Path | None:
-        export_dir = Path(export_record["path"])
+        # export_record["path"] can be missing or "" -- e.g. an export that
+        # failed before its folder was ever created. Path("") resolves to
+        # the current working directory, which always exists, so this must
+        # be checked explicitly rather than falling through to the
+        # export_dir.exists() check below (which would then silently treat
+        # the app's own cwd as a real export folder).
+        raw_path = export_record.get("path")
+        if not raw_path:
+            show_error(
+                self,
+                "No report available",
+                "This export never created a local folder, so there is no report to open.",
+            )
+            return None
+        export_dir = Path(raw_path)
         if not export_dir.exists():
             show_error(self, "Export folder missing", "This export's folder no longer exists on disk.")
             return None
@@ -1790,6 +1879,11 @@ class MainWindow(QMainWindow):
                 metrics.append(("RAW Data", format_bytes(summary["raw_bytes"])))
             if summary.get("videos"):
                 metrics.append(("Videos", f"{summary['videos']:,}"))
+            if summary.get("high_signal_videos"):
+                metrics.append(("High Signal", f"{summary['high_signal_videos']:,}"))
+            duration = self._export_duration_text(export_record)
+            if duration:
+                metrics.append(("Duration", duration))
             if summary.get("warnings"):
                 metrics.append(("Warnings", str(summary["warnings"])))
         if not metrics:
@@ -1878,8 +1972,8 @@ class MainWindow(QMainWindow):
                     ),
                     (
                         "folder",
-                        "Open Export Folder",
-                        lambda: open_in_explorer(Path(self.settings.export_folder)),
+                        "Open Research Folder",
+                        lambda: self._open_research_folder(agent, run),
                     ),
                     (
                         "trash",
@@ -2197,17 +2291,51 @@ class MainWindow(QMainWindow):
         if not agent:
             return
         menu = QMenu(self)
+        edit_action = menu.addAction("Edit Agent…")
+        edit_action.triggered.connect(lambda: self.edit_agent(agent))
         copy_action = menu.addAction("Copy Agent ID")
         copy_action.triggered.connect(lambda: QApplication.clipboard().setText(agent.id))
         if agent.is_recurring:
             toggle = menu.addAction("Pause" if agent.active else "Resume")
             toggle.triggered.connect(lambda: self.toggle_agent(agent))
-        folder_action = menu.addAction("Open Export Folder")
-        folder_action.triggered.connect(lambda: open_in_explorer(Path(self.settings.export_folder)))
+        folder_action = menu.addAction("Open Folder")
+        folder_action.triggered.connect(lambda: self._open_agent_folder(agent))
         menu.addSeparator()
         delete_action = menu.addAction("Delete Agent…")
         delete_action.triggered.connect(lambda: self.delete_agent(agent))
         menu.exec(self.agent_list.mapToGlobal(point))
+
+    def _research_menu(self, point: Any) -> None:
+        item = self.research_list.itemAt(point)
+        if not item:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
+        agent = self.agents.get(str(data.get("agent_id")))
+        run = next(
+            (value for value in self.runs.get(str(data.get("agent_id")), []) if value.id == str(data.get("run_id"))),
+            None,
+        )
+        if not agent or not run:
+            return
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy Run ID")
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(run.id))
+        folder_action = menu.addAction("Open Folder")
+        folder_action.triggered.connect(lambda: self._open_research_folder(agent, run))
+        menu.addSeparator()
+        # There is no Virlo API to edit an existing Run in place -- only a
+        # new Agent (and therefore a new Research) can be created. "Run
+        # Again with Changes" reuses the existing New Research flow,
+        # pre-filled from this Agent's current configuration, rather than
+        # a form that would falsely imply the past result itself can change.
+        rerun_action = menu.addAction("Run Again with Changes…")
+        rerun_action.triggered.connect(lambda: self.show_new_research(agent.id))
+        menu.addSeparator()
+        hide_action = menu.addAction("Hide from Virlo Exporter (local only)…")
+        hide_action.triggered.connect(lambda: self.hide_research_locally(agent, run))
+        menu.exec(self.research_list.mapToGlobal(point))
 
     def _process_selected(self, item: QListWidgetItem) -> None:
         data = item.data(Qt.ItemDataRole.UserRole)
@@ -2439,13 +2567,23 @@ class MainWindow(QMainWindow):
             lambda event: self._show_stage_diagnostics(agent, run, event)
         )
         page_layout.addWidget(timeline)
+        raw_path = export_record.get("path")
+        export_dir = Path(raw_path) if raw_path else None
+        folder_exists = export_dir is not None and export_dir.exists()
         actions = QHBoxLayout()
         open_button = QPushButton("Open Folder")
+        open_button.setEnabled(folder_exists)
+        open_button.setToolTip("" if folder_exists else "This export's folder is not available on disk.")
         open_button.clicked.connect(
-            lambda: open_in_explorer(Path(export_record["path"]))
+            lambda: open_in_explorer(export_dir) if export_dir is not None else None
         )
         actions.addWidget(open_button)
         report_button = QPushButton("Report")
+        report_enabled = folder_exists and has_actionable_report(record_status)
+        report_button.setEnabled(report_enabled)
+        report_button.setToolTip(
+            "" if report_enabled else "No diagnostic report issues for this export."
+        )
         report_button.clicked.connect(
             lambda: self.reveal_export_report(agent, run, export_record)
         )

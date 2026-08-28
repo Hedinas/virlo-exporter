@@ -64,6 +64,28 @@ def test_direct_navigation_agent_to_research_and_back(tmp_path, qapp) -> None:
     assert window.agent_list.currentItem() is not None
 
 
+def test_research_run_card_title_click_opens_that_research_directly(tmp_path, qapp) -> None:
+    # The Research name in Agent detail's Research Runs list must navigate
+    # straight to that Research's own detail page -- via the exact same
+    # show_run() path as the sidebar and the "Open Research" icon action --
+    # not require a separate sidebar selection step afterward.
+    from virlo_exporter.ui.main_window import ClickableTitleLabel
+
+    window = _make_window(tmp_path, qapp)
+    agent = window.agents["agent-1"]
+    run = window.runs["agent-1"][0]
+
+    card = window._run_card(agent, run)
+    title = card.findChild(ClickableTitleLabel)
+    assert title is not None
+
+    title.clicked.emit()
+
+    assert window._current_page == ("run", "agent-1", run.id)
+    assert window.research_list.currentItem() is not None
+    assert window.agent_list.currentItem() is None
+
+
 def test_hide_research_locally_removes_it_and_returns_to_agent(tmp_path, qapp) -> None:
     window = _make_window(tmp_path, qapp)
     agent = window.agents["agent-1"]

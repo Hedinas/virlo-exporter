@@ -146,6 +146,31 @@ def test_ensure_report_regenerates_missing_file_from_persisted_stages(tmp_path) 
     assert report["export"]["agent_name"] == "Test Agent"
 
 
+def test_export_dir_never_assigned_stores_honest_empty_path_not_a_fake_pending_folder(
+    tmp_path,
+) -> None:
+    # Reproduces a real bug: when the export fails before export_dir is ever
+    # assigned (e.g. get_agent/get_run itself raises), the code used to fall
+    # back to `provisional` (export_root / "pending") and persist THAT as the
+    # export's permanent path -- but that directory is never actually
+    # created on disk, so Report/Open Folder later look plausible while
+    # pointing at a folder that never existed under the exports root.
+    db = Database(tmp_path / "state.db")
+    db.assign_runs("agent-1", [{"id": "run-1", "started_at": "2026-01-01"}])
+
+    class BrokenMetadataClient(FakeClient):
+        def get_agent(self, agent_id: str) -> dict:
+            raise VirloError("agent lookup failed", status_code=500)
+
+    engine = ExportEngine(BrokenMetadataClient(), db, tmp_path / "exports", baseline_sample_size=20)
+    with contextlib.suppress(VirloError):
+        engine.export("agent-1", "run-1")
+
+    record = db.export_history("agent-1", "run-1")[0]
+    assert record["path"] == ""
+    assert not (tmp_path / "exports" / "pending").exists()
+
+
 def test_reveal_in_explorer_invokes_explorer_select(tmp_path, monkeypatch) -> None:
     calls: list[list[str]] = []
 
