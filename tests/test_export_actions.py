@@ -3,12 +3,24 @@ from __future__ import annotations
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtWidgets import QToolButton
+import pytest
+from PySide6.QtCore import QEvent, QRect
+from PySide6.QtWidgets import QLabel, QScrollArea, QToolButton, QWidget
 
 from virlo_exporter.config import AppSettings, SettingsStore
 from virlo_exporter.export import report as report_module
 from virlo_exporter.storage.database import Database
-from virlo_exporter.ui.main_window import MainWindow
+from virlo_exporter.ui.components import FlowLayout
+from virlo_exporter.ui.main_window import MainWindow, ResponsiveColumns
+
+
+@pytest.fixture(autouse=True)
+def close_qt_windows_after_test(qapp):
+    yield
+    for widget in qapp.topLevelWidgets():
+        widget.close()
+        widget.deleteLater()
+    qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 class NoKeyStore:
@@ -172,7 +184,7 @@ def _report_button(card) -> QToolButton:
     return next(
         button
         for button in card.findChildren(QToolButton)
-        if button.toolTip() in ("Open report", "No diagnostic report issues for this export.")
+        if button.toolTip() == "Report"
     )
 
 
@@ -183,7 +195,7 @@ def test_report_action_disabled_for_a_fully_clean_export(tmp_path, qapp) -> None
     card = window._export_card(agent, run, export_record)
     button = _report_button(card)
     assert not button.isEnabled()
-    assert button.toolTip() == "No diagnostic report issues for this export."
+    assert button.toolTip() == "Report"
 
 
 def test_report_action_enabled_for_cancelled_warning_and_failed_exports(tmp_path, qapp) -> None:
@@ -194,7 +206,7 @@ def test_report_action_enabled_for_cancelled_warning_and_failed_exports(tmp_path
         card = window._export_card(agent, run, export_record)
         button = _report_button(card)
         assert button.isEnabled(), f"Report must be enabled for status={status}"
-        assert button.toolTip() == "Open report"
+        assert button.toolTip() == "Report"
 
 
 def test_cancel_export_reacts_instantly_and_preserves_route(tmp_path, qapp) -> None:
@@ -225,8 +237,6 @@ def test_cancel_export_reacts_instantly_and_preserves_route(tmp_path, qapp) -> N
 
 
 def test_cancelled_export_card_shows_interrupted_context_not_zeroed_metrics(tmp_path, qapp) -> None:
-    from PySide6.QtWidgets import QLabel
-
     window, agent, run, export_record, export_dir = _make_window_with_export(
         tmp_path, qapp, status="cancelled"
     )
@@ -255,10 +265,139 @@ def test_cancelled_export_card_shows_interrupted_context_not_zeroed_metrics(tmp_
     assert any(text == "Videos" for text in labels)  # the interrupted-stage value itself
 
 
+def test_complete_export_card_uses_compact_useful_hierarchy(tmp_path, qapp) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    report = report_module.build_report(
+        export_row={
+            "export_number": export_record["export_number"],
+            "research_number": 1,
+            "status": "complete",
+        },
+        stages=[],
+        agent_name="Raxeko",
+        summary={
+            "dataset_bytes": 4096,
+            "raw_bytes": 8192,
+            "videos": 100,
+            "high_signal_videos": 17,
+        },
+    )
+    report_module.write_report(export_dir, report)
+    export_record = {
+        **export_record,
+        "started_at": "2026-08-26T05:44:00Z",
+        "completed_at": "2026-08-26T05:45:37Z",
+    }
+
+    card = window._export_card(agent, run, export_record)
+    labels = card.findChildren(QLabel)
+    texts = [label.text() for label in labels]
+
+    assert {"AI DATASET", "RAW DATA", "VIDEOS", "DURATION", "HIGH SIGNAL"} <= set(texts)
+    assert {"4.0 KB", "8.0 KB", "100", "1m 37s", "17"} <= set(texts)
+    assert next(label for label in labels if label.text() == "Export #001").objectName() == (
+        "exportCardTitle"
+    )
+    assert all(
+        label.objectName() == "exportMetricValue"
+        for label in labels
+        if label.text() in {"4.0 KB", "8.0 KB", "100", "1m 37s", "17"}
+    )
+
+
+def test_export_cards_in_the_same_flow_row_receive_equal_height(tmp_path, qapp) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    complete = window._export_card(agent, run, export_record)
+    interrupted_record = {**export_record, "status": "cancelled"}
+    interrupted = window._export_card(agent, run, interrupted_record)
+    host = QWidget()
+    flow = FlowLayout(equal_row_heights=True, spacing=14)
+    host.setLayout(flow)
+    flow.addWidget(complete)
+    flow.addWidget(interrupted)
+
+    flow.setGeometry(QRect(0, 0, 1100, 500))
+
+    assert complete.y() == interrupted.y()
+    assert complete.height() == interrupted.height()
+    assert complete.maximumWidth() > interrupted.maximumWidth()
+
+
 def test_research_run_card_is_bounded_width(tmp_path, qapp) -> None:
     window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
     card = window._run_card(agent, run)
     assert card.maximumWidth() <= 520
+
+
+def test_research_run_card_uses_clickable_name_without_repeated_identity(
+    tmp_path, qapp
+) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    window.database.rename_research(agent.id, run.id, "First run")
+    run.execution_time_ms = 97_000
+
+    card = window._run_card(agent, run)
+    labels = card.findChildren(QLabel)
+    texts = [label.text() for label in labels]
+
+    assert next(label for label in labels if label.text() == "First run").objectName() == (
+        "researchLink"
+    )
+    assert not any("Research #001 · Raxeko" in text for text in texts)
+    assert "EXPORTS" in texts
+    assert "DURATION" in texts
+    assert "1m 37s" in texts
+
+
+def test_agent_intent_keeps_full_text_and_wraps_at_narrow_width(tmp_path, qapp) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+    agent.intent = " ".join(["A complete research intent that must remain visible."] * 12)
+
+    window.resize(940, 700)
+    window.show()
+    window.show_agent(agent.id)
+    qapp.processEvents()
+    columns = window.detail.currentWidget().findChild(ResponsiveColumns)
+    intent = next(
+        label
+        for label in window.detail.currentWidget().findChildren(QLabel)
+        if label.objectName() == "bodyText"
+    )
+
+    assert columns is not None
+    assert columns.is_stacked()
+    assert intent.text() == agent.intent
+    assert intent.wordWrap()
+    assert intent.heightForWidth(220) > intent.fontMetrics().height() * 3
+    assert intent.height() >= intent.heightForWidth(intent.width())
+
+
+def test_research_header_actions_stay_inside_narrow_viewport(tmp_path, qapp) -> None:
+    window, agent, run, export_record, export_dir = _make_window_with_export(tmp_path, qapp)
+
+    window.resize(940, 700)
+    window.show()
+    window.show_run(agent, run)
+    qapp.processEvents()
+    page = window.detail.currentWidget()
+    scroll = page.findChild(QScrollArea)
+    assert scroll is not None
+    assert scroll.widget().width() <= scroll.viewport().width()
+
+    action_buttons = [
+        button
+        for button in page.findChildren(QToolButton)
+        if button.toolTip() in {"Copy ID", "Open Folder", "Delete"}
+        and button.geometry().y() < 100
+    ]
+    assert {button.toolTip() for button in action_buttons} == {
+        "Copy ID",
+        "Open Folder",
+        "Delete",
+    }
+    for button in action_buttons:
+        right_edge = button.mapTo(scroll.viewport(), button.rect().topRight()).x()
+        assert right_edge <= scroll.viewport().width()
 
 
 def test_corrupt_report_file_degrades_gracefully_instead_of_crashing(tmp_path, qapp) -> None:

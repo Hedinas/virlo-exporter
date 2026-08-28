@@ -28,7 +28,7 @@ def _agent(**overrides) -> Agent:
 def test_run_metrics_omits_trends_when_not_reported() -> None:
     metrics = MainWindow._run_metrics(_run())
     labels = [label for label, _ in metrics]
-    assert labels == ["Videos", "Slideshows", "Meta Ads", "Outliers"]
+    assert labels == ["Videos", "Slideshows", "Outliers"]
 
 
 def test_run_metrics_includes_trends_when_present() -> None:
@@ -47,11 +47,11 @@ def test_run_metrics_never_invents_hooks_sounds_hashtags() -> None:
     assert "Hashtags" not in labels
 
 
-def test_platform_pills_only_lists_agent_configured_platforms() -> None:
+def test_platform_metrics_only_lists_agent_configured_platforms() -> None:
     agent = _agent(platforms=["youtube", "tiktok", "instagram", "meta_ads"])
     run = _run(meta_ads_linked=411, raw={"youtube_count": 3518, "tiktok_count": 4141, "instagram_count": 1904})
-    pills = MainWindow._platform_pills(agent, run)
-    assert pills == [
+    metrics = MainWindow._platform_metrics(agent, run)
+    assert metrics == [
         ("Youtube", 3518),
         ("Tiktok", 4141),
         ("Instagram", 1904),
@@ -59,18 +59,18 @@ def test_platform_pills_only_lists_agent_configured_platforms() -> None:
     ]
 
 
-def test_platform_pills_omits_count_when_not_available() -> None:
+def test_platform_metrics_omits_count_when_not_available() -> None:
     agent = _agent(platforms=["youtube"])
     run = _run(raw={})
-    pills = MainWindow._platform_pills(agent, run)
-    assert pills == [("Youtube", None)]
+    metrics = MainWindow._platform_metrics(agent, run)
+    assert metrics == [("Youtube", None)]
 
 
-def test_platform_pills_never_sums_meta_ads_into_videos() -> None:
+def test_platform_metrics_never_sums_meta_ads_into_videos() -> None:
     agent = _agent(platforms=["meta_ads"])
     run = _run(videos_linked=100, meta_ads_linked=411)
-    pills = MainWindow._platform_pills(agent, run)
-    assert pills == [("Meta Ads", 411)]
+    platform_metrics = MainWindow._platform_metrics(agent, run)
+    assert platform_metrics == [("Meta Ads", 411)]
     # The Videos metric is untouched by Meta Ads' own count.
     metrics = dict(MainWindow._run_metrics(run))
     assert metrics["Videos"] == "100"

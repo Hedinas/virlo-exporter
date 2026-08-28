@@ -42,6 +42,10 @@ QLabel#cardHeading { font-size: 15px; font-weight: 700; color: #F9FAFB; letter-s
 QLabel#microLabel { font-size: 10px; font-weight: 700; color: #7B8494; letter-spacing: 0.5px; }
 QLabel#title { font-size: 25px; font-weight: 700; color: #F9FAFB; }
 QLabel#cardTitle { font-size: 17px; font-weight: 700; color: #F9FAFB; }
+QLabel#researchLink { font-size: 17px; font-weight: 700; color: #F3F4F6; }
+QLabel#researchLink:hover { color: #FFFFFF; }
+QLabel#exportCardTitle { font-size: 20px; font-weight: 700; color: #F9FAFB; }
+QLabel#cardMeta, QLabel#exportMeta { color: #8B94A3; font-size: 11px; }
 QLabel#rowTitle { font-weight: 600; color: #F3F4F6; }
 QLabel#bodyText { color: #D8DCE3; line-height: 1.35; }
 QLabel#costValue { font-weight: 700; color: #F9FAFB; }
@@ -114,6 +118,8 @@ QTableCornerButton::section { background: #1C2027; border: 1px solid #2A303A; }
 
 QScrollArea { border: none; background: #0D0F12; }
 QScrollArea > QWidget > QWidget, QAbstractScrollArea::viewport { background: transparent; }
+QWidget#flowHost, QWidget#configurationMain { background: transparent; }
+QSplitter#configurationSplitter { background: transparent; }
 QScrollBar:vertical { background: #12151A; width: 11px; margin: 0; border: none; }
 QScrollBar::handle:vertical {
     background: #3B4655; min-height: 30px; border-radius: 5px; margin: 2px;
@@ -195,6 +201,20 @@ QToolButton#gearButton, QToolButton#pencilButton, QToolButton#iconAction {
 QToolButton#gearButton:hover, QToolButton#pencilButton:hover, QToolButton#iconAction:hover {
     color: #DCE9FF; background: #29364A; border-radius: 6px;
 }
+QToolButton#gearButton:disabled, QToolButton#pencilButton:disabled,
+QToolButton#iconAction:disabled, QToolButton#gearButton:disabled:hover,
+QToolButton#pencilButton:disabled:hover, QToolButton#iconAction:disabled:hover {
+    background: transparent; border: none; color: #4A515C;
+}
+QToolButton#overflowButton {
+    background: transparent; border: none; color: #8E98A7; font-size: 18px;
+    font-weight: 700; min-width: 28px; max-width: 28px;
+    min-height: 28px; max-height: 28px; padding: 0px;
+}
+QToolButton#overflowButton:hover {
+    color: #F3F4F6; background: #29364A; border-radius: 6px;
+}
+QToolButton#overflowButton::menu-indicator { image: none; width: 0px; }
 QToolButton#platformPill {
     background: #171A20; color: #B7BEC9; border: 1px solid #465163;
     border-radius: 15px; padding: 7px 14px;
@@ -220,7 +240,7 @@ QLabel#platformBadge {
     background: #171A20; color: #B7BEC9; border: 1px solid #465163;
     border-radius: 12px; padding: 5px 12px; font-weight: 600; font-size: 12px;
 }
-QFrame#miniCard, QFrame#metricCard {
+QFrame#miniCard, QFrame#metricCard, QFrame#exportMetricCard {
     background: #12151A; border: 1px solid #2A303A; border-radius: 9px;
 }
 QFrame#intentBox { background: transparent; border: 1px solid #2A303A; border-radius: 8px; }
@@ -230,6 +250,7 @@ QLabel#miniCardValue[state="off"] { color: #9CA3AF; }
 QLabel#miniCardValue[state="neutral"] { color: #D8DCE3; }
 QLabel#miniCardValue[state="error"] { color: #EF4444; }
 QLabel#metricValue { font-size: 19px; font-weight: 700; color: #F9FAFB; }
+QLabel#exportMetricValue { font-size: 16px; font-weight: 700; color: #E9EDF3; }
 QLabel#statusBadge {
     border-radius: 11px; padding: 3px 11px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
 }

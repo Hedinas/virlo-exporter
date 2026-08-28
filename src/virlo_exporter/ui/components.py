@@ -87,9 +87,17 @@ class PersistentDialog(QDialog):
 
 
 class FlowLayout(QLayout):
-    def __init__(self, parent: QWidget | None = None, margin: int = 0, spacing: int = 7) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        margin: int = 0,
+        spacing: int = 7,
+        *,
+        equal_row_heights: bool = False,
+    ) -> None:
         super().__init__(parent)
         self._items: list[Any] = []
+        self.equal_row_heights = equal_row_heights
         self.setContentsMargins(margin, margin, margin, margin)
         self.setSpacing(spacing)
 
@@ -133,21 +141,34 @@ class FlowLayout(QLayout):
         area = rect.adjusted(left, top, -right, -bottom)
         x = area.x()
         y = area.y()
-        line_height = 0
         spacing = self.spacing()
+        row: list[tuple[Any, int, int, int]] = []
+
+        def finish_row() -> int:
+            if not row:
+                return 0
+            row_height = max(entry[3] for entry in row)
+            if not test_only:
+                for item, item_x, item_width, item_height in row:
+                    height = row_height if self.equal_row_heights else item_height
+                    item.setGeometry(QRect(QPoint(item_x, y), QSize(item_width, height)))
+            return row_height
+
         for item in self._items:
             hint = item.sizeHint()
-            next_x = x + hint.width() + spacing
-            if next_x - spacing > area.right() and line_height > 0:
+            item_width = min(hint.width(), max(0, area.width()))
+            item_height = hint.height()
+            if item.hasHeightForWidth():
+                item_height = max(item_height, item.heightForWidth(item_width))
+            next_x = x + item_width + spacing
+            if next_x - spacing > area.right() and row:
                 x = area.x()
-                y += line_height + spacing
-                next_x = x + hint.width() + spacing
-                line_height = 0
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), hint))
+                y += finish_row() + spacing
+                row = []
+                next_x = x + item_width + spacing
+            row.append((item, x, item_width, item_height))
             x = next_x
-            line_height = max(line_height, hint.height())
-        return y + line_height - rect.y() + bottom
+        return y + finish_row() - rect.y() + bottom
 
 
 class LimitedTextEdit(QTextEdit):

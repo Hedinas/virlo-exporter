@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QToolButton
 
 from virlo_exporter.config import AppSettings, SettingsStore
+from virlo_exporter.models import Agent
 from virlo_exporter.storage.database import Database
 from virlo_exporter.ui.components import CollapsibleSection
-from virlo_exporter.ui.main_window import MainWindow, ProcessRow
+from virlo_exporter.ui.main_window import AgentRow, MainWindow, ProcessRow, ResearchRow
 
 
 def test_active_process_row_animates_its_perimeter(qapp) -> None:
@@ -107,6 +109,60 @@ def test_agents_section_header_toggles_without_a_separate_chevron_button(tmp_pat
     assert window.agents_section.is_expanded() != before
     window.agents_section.header.clicked.emit()
     assert window.agents_section.is_expanded() == before
+
+
+def test_agent_sidebar_row_uses_rename_pencil_and_compact_overflow_menu(qapp) -> None:
+    def callback() -> None:
+        pass
+
+    row = AgentRow(
+        Agent(id="agent-1", name="Raxeko"),
+        "Active",
+        callback,
+        callback,
+        callback,
+        callback,
+        callback,
+    )
+    buttons = row.findChildren(QToolButton)
+    assert [button.objectName() for button in buttons] == [
+        "pencilButton",
+        "overflowButton",
+    ]
+    overflow = buttons[-1]
+    assert [action.text() for action in overflow.menu().actions()] == [
+        "Edit",
+        "Copy ID",
+        "Open Folder",
+        "Delete",
+    ]
+
+
+def test_research_sidebar_row_uses_rename_pencil_and_compact_overflow_menu(qapp) -> None:
+    def callback() -> None:
+        pass
+
+    row = ResearchRow(
+        "First run",
+        "Raxeko",
+        "Aug 24 · 4:42 PM",
+        callback,
+        callback,
+        callback,
+        callback,
+        callback,
+    )
+    buttons = row.findChildren(QToolButton)
+    assert [button.objectName() for button in buttons] == [
+        "pencilButton",
+        "overflowButton",
+    ]
+    assert [action.text() for action in buttons[-1].menu().actions()] == [
+        "Open Research",
+        "Copy ID",
+        "Open Folder",
+        "Delete",
+    ]
 
 
 def test_global_research_list_includes_every_agents_runs(tmp_path, qapp) -> None:

@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -140,10 +141,30 @@ def card() -> tuple[QFrame, QVBoxLayout]:
     return frame, layout
 
 
-def pill(text: str) -> QLabel:
-    label = QLabel(text)
-    label.setObjectName("platformBadge")
-    return label
+class PreferredWidthCard(QFrame):
+    def __init__(self, preferred_width: int) -> None:
+        super().__init__()
+        self.setObjectName("card")
+        self._preferred_width = preferred_width
+        self.setMaximumWidth(preferred_width)
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        hint.setWidth(self._preferred_width)
+        return hint
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        hint.setWidth(min(320, self._preferred_width))
+        return hint
+
+
+def preferred_width_card(width: int) -> tuple[QFrame, QVBoxLayout]:
+    frame = PreferredWidthCard(width)
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(18, 16, 18, 16)
+    layout.setSpacing(10)
+    return frame, layout
 
 
 def mini_card(label_text: str, value_text: str, state: str = "neutral") -> QFrame:
@@ -364,18 +385,107 @@ def display_status_text(status: str) -> str:
     return STATUS_DISPLAY_TEXT.get(status.casefold(), status.replace("_", " ").title())
 
 
-def metric_card(label_text: str, value_text: str) -> QFrame:
+def metric_card(label_text: str, value_text: str, *, compact: bool = False) -> QFrame:
     frame = QFrame()
-    frame.setObjectName("metricCard")
+    frame.setObjectName("exportMetricCard" if compact else "metricCard")
     frame.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
     layout = QVBoxLayout(frame)
-    layout.setContentsMargins(14, 11, 14, 11)
+    layout.setContentsMargins(12 if compact else 14, 9 if compact else 11, 12 if compact else 14, 9 if compact else 11)
     layout.setSpacing(3)
     layout.addWidget(micro_label(label_text))
     value = QLabel(value_text)
-    value.setObjectName("metricValue")
+    value.setObjectName("exportMetricValue" if compact else "metricValue")
     layout.addWidget(value)
     return frame
+
+
+class InteractiveTextLabel(QLabel):
+    clicked = Signal()
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.setObjectName("researchLink")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class WrappingDetailLabel(QLabel):
+    """A wrapped detail label whose parent always receives its real height."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.setWordWrap(True)
+
+
+def overflow_menu_button(actions: Any) -> QToolButton:
+    button = QToolButton()
+    button.setObjectName("overflowButton")
+    button.setText("…")
+    button.setToolTip("More actions")
+    button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+    menu = QMenu(button)
+    menu.setObjectName("actionMenu")
+    for label, callback in actions:
+        action = menu.addAction(label)
+        action.triggered.connect(
+            lambda _checked=False, handler=callback: handler()
+        )
+    button.setMenu(menu)
+    return button
+
+
+class ResponsiveColumns(QWidget):
+    """Two content-driven columns that stack before either side can clip."""
+
+    def __init__(
+        self,
+        primary: QWidget,
+        secondary: QWidget,
+        *,
+        breakpoint: int = 760,
+    ) -> None:
+        super().__init__()
+        self.setObjectName("responsiveColumns")
+        self._primary = primary
+        self._secondary = secondary
+        self._breakpoint = breakpoint
+        self._stacked: bool | None = None
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(14)
+        self._grid.setVerticalSpacing(14)
+        self._apply_layout(False)
+
+    def _apply_layout(self, stacked: bool) -> None:
+        if stacked == self._stacked:
+            return
+        self._grid.removeWidget(self._primary)
+        self._grid.removeWidget(self._secondary)
+        for index in range(2):
+            self._grid.setColumnStretch(index, 0)
+            self._grid.setRowStretch(index, 0)
+        if stacked:
+            self._grid.addWidget(self._primary, 0, 0)
+            self._grid.addWidget(self._secondary, 1, 0)
+            self._grid.setColumnStretch(0, 1)
+        else:
+            self._grid.addWidget(self._primary, 0, 0)
+            self._grid.addWidget(self._secondary, 0, 1)
+            self._grid.setColumnStretch(0, 2)
+            self._grid.setColumnStretch(1, 1)
+        self._stacked = stacked
+        self.updateGeometry()
+
+    def is_stacked(self) -> bool:
+        return bool(self._stacked)
+
+    def resizeEvent(self, event: Any) -> None:
+        self._apply_layout(event.size().width() < self._breakpoint)
+        super().resizeEvent(event)
 
 
 class RowList(QWidget):
@@ -476,7 +586,14 @@ class AgentRow(QFrame):
     clicked = Signal()
 
     def __init__(
-        self, agent: Agent, status: str, on_edit: Any, on_rename: Any, on_delete: Any
+        self,
+        agent: Agent,
+        status: str,
+        on_edit: Any,
+        on_rename: Any,
+        on_copy: Any,
+        on_open_folder: Any,
+        on_delete: Any,
     ) -> None:
         super().__init__()
         self.setObjectName("sidebarRow")
@@ -486,38 +603,40 @@ class AgentRow(QFrame):
         layout.setSpacing(2)
         text = QVBoxLayout()
         text.setSpacing(1)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(2)
         name = QLabel(agent.name)
         name.setObjectName("rowTitle")
         name.setWordWrap(True)
+        name_row.addWidget(name)
+        pencil = QToolButton()
+        pencil.setObjectName("pencilButton")
+        pencil.setIcon(icons.icon("pencil"))
+        pencil.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
+        pencil.setToolTip("Rename")
+        pencil.clicked.connect(on_rename)
+        name_row.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
+        name_row.addStretch()
         secondary = QLabel(
             f"{'Recurring' if agent.is_recurring else 'One-time'} · {status}"
         )
         secondary.setObjectName("muted")
         secondary.setWordWrap(True)
-        text.addWidget(name)
+        text.addLayout(name_row)
         text.addWidget(secondary)
-        pencil = QToolButton()
-        pencil.setObjectName("pencilButton")
-        pencil.setIcon(icons.icon("pencil"))
-        pencil.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
-        pencil.setToolTip(f"Rename {agent.name}")
-        pencil.clicked.connect(on_rename)
-        gear = QToolButton()
-        gear.setObjectName("gearButton")
-        gear.setIcon(icons.icon("gear"))
-        gear.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
-        gear.setToolTip(f"Edit {agent.name}")
-        gear.clicked.connect(on_edit)
-        trash = QToolButton()
-        trash.setObjectName("iconAction")
-        trash.setIcon(icons.icon("trash"))
-        trash.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
-        trash.setToolTip(f"Delete {agent.name}")
-        trash.clicked.connect(on_delete)
         layout.addLayout(text, 1)
-        layout.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(gear, 0, Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(trash, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(
+            overflow_menu_button(
+                (
+                    ("Edit", on_edit),
+                    ("Copy ID", on_copy),
+                    ("Open Folder", on_open_folder),
+                    ("Delete", on_delete),
+                )
+            ),
+            0,
+            Qt.AlignmentFlag.AlignTop,
+        )
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
@@ -534,7 +653,15 @@ class ResearchRow(QFrame):
     clicked = Signal()
 
     def __init__(
-        self, title_text: str, agent_name: str, date_text: str, on_rename: Any
+        self,
+        title_text: str,
+        agent_name: str,
+        date_text: str,
+        on_rename: Any,
+        on_open: Any,
+        on_copy: Any,
+        on_open_folder: Any,
+        on_delete: Any,
     ) -> None:
         super().__init__()
         self.setObjectName("sidebarRow")
@@ -544,26 +671,42 @@ class ResearchRow(QFrame):
         layout.setSpacing(2)
         text = QVBoxLayout()
         text.setSpacing(1)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(2)
         title = QLabel(title_text)
         title.setObjectName("rowTitle")
         title.setWordWrap(True)
+        title_row.addWidget(title)
+        pencil = QToolButton()
+        pencil.setObjectName("pencilButton")
+        pencil.setIcon(icons.icon("pencil"))
+        pencil.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
+        pencil.setToolTip("Rename")
+        pencil.clicked.connect(on_rename)
+        title_row.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
+        title_row.addStretch()
         agent_label = QLabel(agent_name)
         agent_label.setObjectName("muted")
         agent_label.setWordWrap(True)
         date_label = QLabel(date_text)
         date_label.setObjectName("muted")
         date_label.setWordWrap(True)
-        text.addWidget(title)
+        text.addLayout(title_row)
         text.addWidget(agent_label)
         text.addWidget(date_label)
-        pencil = QToolButton()
-        pencil.setObjectName("pencilButton")
-        pencil.setIcon(icons.icon("pencil"))
-        pencil.setIconSize(QSize(ICON_BUTTON_SIZE, ICON_BUTTON_SIZE))
-        pencil.setToolTip("Rename research")
-        pencil.clicked.connect(on_rename)
         layout.addLayout(text, 1)
-        layout.addWidget(pencil, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(
+            overflow_menu_button(
+                (
+                    ("Open Research", on_open),
+                    ("Copy ID", on_copy),
+                    ("Open Folder", on_open_folder),
+                    ("Delete", on_delete),
+                )
+            ),
+            0,
+            Qt.AlignmentFlag.AlignTop,
+        )
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
@@ -685,6 +828,21 @@ class MainWindow(QMainWindow):
         self.refresh_timer.timeout.connect(self.refresh)
         self.refresh_timer.start(60000)
 
+    def _sync_intent_heights(self) -> None:
+        if not hasattr(self, "detail"):
+            return
+        detail_width = max(320, self.detail.width())
+        columns_width = max(320, detail_width - 112)
+        primary_width = columns_width
+        if columns_width >= 760:
+            primary_width = (columns_width - 14) * 2 // 3
+        content_width = max(220, primary_width - 55)
+        current = self.detail.currentWidget()
+        if current is None:
+            return
+        for label in current.findChildren(WrappingDetailLabel):
+            label.setMinimumHeight(label.heightForWidth(content_width))
+
     def _build_ui(self) -> None:
         central = QWidget()
         root = QVBoxLayout(central)
@@ -722,6 +880,7 @@ class MainWindow(QMainWindow):
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setMinimumWidth(245)
+        sidebar.setMaximumWidth(420)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(10, 12, 7, 10)
         sidebar_layout.setSpacing(0)
@@ -1041,6 +1200,8 @@ class MainWindow(QMainWindow):
                 status,
                 lambda _=False, value=agent: self.edit_agent(value),
                 lambda _=False, value=agent: self.quick_rename_agent(value),
+                lambda _=False, value=agent: QApplication.clipboard().setText(value.id),
+                lambda _=False: open_in_explorer(Path(self.settings.export_folder)),
                 lambda _=False, value=agent: self.delete_agent(value),
             )
             self.agent_list.addItem(item)
@@ -1179,6 +1340,10 @@ class MainWindow(QMainWindow):
                 agent.name,
                 compact_date(run_timestamp(run)),
                 lambda _=False, a=agent, r=run: self.rename_research(a, r),
+                lambda _=False, a=agent, r=run: self.show_run(a, r),
+                lambda _=False, value=run: QApplication.clipboard().setText(value.id),
+                lambda _=False: open_in_explorer(Path(self.settings.export_folder)),
+                lambda _=False, a=agent, r=run: self.hide_research_locally(a, r),
             )
             self.research_list.addItem(item)
             self.research_list.setItemWidget(item, row)
@@ -1368,28 +1533,32 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
+        body.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 18, 0)
         layout.setSpacing(14)
         title_box = QVBoxLayout()
         title_row = QHBoxLayout()
         title = QLabel(agent.name)
         title.setObjectName("title")
+        title.setWordWrap(True)
+        title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         title_row.addWidget(title)
         title_row.addWidget(
-            icon_action_button("pencil", f"Rename {agent.name}", lambda: self.quick_rename_agent(agent))
+            icon_action_button("pencil", "Rename", lambda: self.quick_rename_agent(agent))
         )
         title_row.addStretch()
         title_row.addLayout(
             icon_toolbar(
                 (
-                    ("gear", "Edit agent settings", lambda: self.edit_agent(agent)),
-                    ("copy", "Copy Agent ID", lambda: QApplication.clipboard().setText(agent.id)),
+                    ("gear", "Edit", lambda: self.edit_agent(agent)),
+                    ("copy", "Copy ID", lambda: QApplication.clipboard().setText(agent.id)),
                     (
                         "folder",
-                        "Open Export Folder",
+                        "Open Folder",
                         lambda: open_in_explorer(Path(self.settings.export_folder)),
                     ),
-                    ("trash", f"Delete {agent.name}", lambda: self.delete_agent(agent)),
+                    ("trash", "Delete", lambda: self.delete_agent(agent)),
                 )
             )
         )
@@ -1404,33 +1573,32 @@ class MainWindow(QMainWindow):
         layout.addLayout(title_box)
 
         overview, overview_layout = card()
+        overview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         overview_layout.addWidget(card_heading("Agent configuration"))
-        config_splitter = QSplitter(Qt.Orientation.Horizontal)
-        config_splitter.setObjectName("configurationSplitter")
-        config_splitter.setChildrenCollapsible(False)
         left = QWidget()
         left.setObjectName("configurationMain")
+        left.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 5, 12, 0)
         left_layout.setSpacing(9)
         left_layout.addWidget(section_label("Intent"))
         intent_box = QFrame()
         intent_box.setObjectName("intentBox")
+        intent_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         intent_box_layout = QVBoxLayout(intent_box)
         intent_box_layout.setContentsMargins(14, 12, 14, 12)
-        intent = QLabel(agent.intent or "No intent returned")
-        intent.setWordWrap(True)
+        intent = WrappingDetailLabel(agent.intent or "No intent returned")
         intent.setObjectName("bodyText")
+        intent.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         intent_box_layout.addWidget(intent)
         left_layout.addWidget(intent_box)
         left_layout.addWidget(section_label("Sources"))
-        platform_row = QHBoxLayout()
-        platform_row.setSpacing(6)
+        platform_row = FlowLayout(spacing=8)
         for value in agent.platforms:
             label_text = "Meta Ads" if value == "meta_ads" else value.title()
-            platform_row.addWidget(pill(label_text))
-        platform_row.addStretch()
+            platform_row.addWidget(mini_card("Source", label_text))
         platform_host = QWidget()
+        platform_host.setObjectName("flowHost")
         platform_host.setLayout(platform_row)
         left_layout.addWidget(platform_host)
 
@@ -1450,6 +1618,7 @@ class MainWindow(QMainWindow):
         ):
             config_grid.addWidget(mini_card(label_text, value_text, state))
         config_grid_host = QWidget()
+        config_grid_host.setObjectName("flowHost")
         config_grid_host.setLayout(config_grid)
         left_layout.addWidget(config_grid_host)
 
@@ -1466,9 +1635,9 @@ class MainWindow(QMainWindow):
         for label_text, value_text in activity_fields:
             activity_grid.addWidget(mini_card(label_text, value_text))
         activity_grid_host = QWidget()
+        activity_grid_host.setObjectName("flowHost")
         activity_grid_host.setLayout(activity_grid)
         left_layout.addWidget(activity_grid_host)
-        left_layout.addStretch()
 
         actions = QHBoxLayout()
         actions.addStretch()
@@ -1481,10 +1650,9 @@ class MainWindow(QMainWindow):
         new_research.clicked.connect(lambda: self.show_new_research(agent.id))
         actions.addWidget(new_research)
         left_layout.addLayout(actions)
-        config_splitter.addWidget(left)
-
         keywords_panel = QFrame()
         keywords_panel.setObjectName("keywordsPanel")
+        keywords_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         keyword_layout = QVBoxLayout(keywords_panel)
         keyword_layout.setContentsMargins(13, 12, 13, 12)
         keyword_header = QHBoxLayout()
@@ -1495,22 +1663,24 @@ class MainWindow(QMainWindow):
         keyword_list = QListWidget()
         keyword_list.setObjectName("keywordDetailList")
         keyword_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
-        keyword_list.addItems(agent.keywords or ["No keywords returned"])
-        keyword_layout.addWidget(keyword_list)
-        config_splitter.addWidget(keywords_panel)
-        config_splitter.setStretchFactor(0, 2)
-        config_splitter.setStretchFactor(1, 1)
-        saved_splitter = self.ui_settings.value("ui/agent_configuration_splitter")
-        if saved_splitter is not None:
-            config_splitter.restoreState(saved_splitter)
-        else:
-            config_splitter.setSizes([680, 320])
-        config_splitter.splitterMoved.connect(
-            lambda _position, _index: self.ui_settings.setValue(
-                "ui/agent_configuration_splitter", config_splitter.saveState()
+        keyword_list.setWordWrap(True)
+        keyword_list.setTextElideMode(Qt.TextElideMode.ElideNone)
+        keyword_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        for keyword in agent.keywords or ["No keywords returned"]:
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 44))
+            keyword_list.addItem(item)
+            keyword_text = QLabel(keyword)
+            keyword_text.setWordWrap(True)
+            keyword_text.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
             )
-        )
-        overview_layout.addWidget(config_splitter)
+            keyword_text.setStyleSheet("background: transparent;")
+            keyword_list.setItemWidget(item, keyword_text)
+        keyword_list.setMinimumHeight(176)
+        keyword_list.setMaximumHeight(320)
+        keyword_layout.addWidget(keyword_list)
+        overview_layout.addWidget(ResponsiveColumns(left, keywords_panel))
         layout.addWidget(overview)
         layout.addWidget(card_heading("Research Runs"))
         if known_runs is None:
@@ -1521,6 +1691,7 @@ class MainWindow(QMainWindow):
         else:
             runs_flow = FlowLayout(spacing=12)
             runs_host = QWidget()
+            runs_host.setObjectName("flowHost")
             runs_host.setLayout(runs_flow)
             for run in sorted(known_runs, key=run_timestamp, reverse=True):
                 runs_flow.addWidget(self._run_card(agent, run))
@@ -1529,6 +1700,7 @@ class MainWindow(QMainWindow):
         scroll.setWidget(body)
         page_layout.addWidget(scroll)
         self._show_page(page)
+        self._sync_intent_heights()
         self._restore_detail_scroll_state(saved_scroll)
 
     def _run_card(self, agent: Agent, run: Run) -> QFrame:
@@ -1537,26 +1709,27 @@ class MainWindow(QMainWindow):
         number = run.local_number or 0
         display_name = self.database.research_display_name(agent.id, run.id)
         top = QHBoxLayout()
-        title = QLabel(display_name or f"Research #{number:03d}")
-        title.setObjectName("cardTitle")
+        title = InteractiveTextLabel(display_name or f"Research #{number:03d}")
+        title.clicked.connect(lambda: self.show_run(agent, run))
         top.addWidget(title)
         top.addWidget(
-            icon_action_button("pencil", "Rename locally", lambda: self.rename_research(agent, run))
+            icon_action_button("pencil", "Rename", lambda: self.rename_research(agent, run))
         )
         top.addStretch()
         top.addWidget(
             status_badge(run.status.replace("_", " "), RUN_STATUS_STATE.get(run.status.casefold(), "neutral"))
         )
         layout.addLayout(top)
-        subtitle = f"Research #{number:03d} · {human_date(run_timestamp(run))}"
-        if display_name:
-            subtitle = f"Research #{number:03d} · {agent.name} · {human_date(run_timestamp(run))}"
-        layout.addWidget(muted(subtitle))
+        date = muted(compact_date(run_timestamp(run)))
+        date.setObjectName("cardMeta")
+        layout.addWidget(date)
 
         metrics_flow = FlowLayout(spacing=8)
         metrics_host = QWidget()
+        metrics_host.setObjectName("flowHost")
         metrics_host.setLayout(metrics_flow)
-        for label_text, value_text in self._run_metrics(run):
+        export_count = len(self.database.export_history(agent.id, run.id))
+        for label_text, value_text in self._research_card_metrics(run, export_count):
             metrics_flow.addWidget(metric_card(label_text, value_text))
         layout.addWidget(metrics_host)
 
@@ -1565,11 +1738,11 @@ class MainWindow(QMainWindow):
                 ("workflow", "Open Research", lambda: self.show_run(agent, run)),
                 (
                     "folder",
-                    "Open Export Folder",
+                    "Open Folder",
                     lambda: open_in_explorer(Path(self.settings.export_folder)),
                 ),
-                ("copy", "Copy Run ID", lambda: QApplication.clipboard().setText(run.id)),
-                ("trash", "Hide locally", lambda: self.hide_research_locally(agent, run)),
+                ("copy", "Copy ID", lambda: QApplication.clipboard().setText(run.id)),
+                ("trash", "Delete", lambda: self.hide_research_locally(agent, run)),
             )
         )
         actions.addStretch()
@@ -1582,6 +1755,20 @@ class MainWindow(QMainWindow):
         return frame
 
     @staticmethod
+    def _research_card_metrics(run: Run, export_count: int) -> list[tuple[str, str]]:
+        metrics = [
+            ("Videos", f"{run.videos_linked:,}"),
+            ("Slideshows", f"{run.slideshows_linked:,}"),
+            ("Outliers", f"{run.outliers_identified:,}"),
+            ("Exports", f"{export_count:,}"),
+        ]
+        if run.execution_time_ms is not None:
+            total_seconds = max(0, int(run.execution_time_ms / 1000))
+            minutes, seconds = divmod(total_seconds, 60)
+            metrics.append(("Duration", f"{minutes}m {seconds:02d}s"))
+        return metrics
+
+    @staticmethod
     def _run_metrics(run: Run) -> list[tuple[str, str]]:
         """Only metrics with real data on the Run itself -- no invented
         tiles, and no extra API calls made just to populate the UI."""
@@ -1589,7 +1776,6 @@ class MainWindow(QMainWindow):
         metrics = [
             ("Videos", f"{run.videos_linked:,}"),
             ("Slideshows", f"{run.slideshows_linked:,}"),
-            ("Meta Ads", f"{run.meta_ads_linked:,}"),
             ("Outliers", f"{run.outliers_identified:,}"),
         ]
         trends = raw.get("trends_detected")
@@ -1598,8 +1784,8 @@ class MainWindow(QMainWindow):
         return metrics
 
     @staticmethod
-    def _platform_pills(agent: Agent, run: Run) -> list[tuple[str, int | None]]:
-        """One pill per Platform the Agent is actually configured for, with
+    def _platform_metrics(agent: Agent, run: Run) -> list[tuple[str, int | None]]:
+        """One metric per Platform the Agent is actually configured for, with
         its real linked count when Virlo provides one -- Meta Ads counts as
         the fourth Platform here, never folded into the Videos total."""
         raw = run.raw or {}
@@ -1716,38 +1902,42 @@ class MainWindow(QMainWindow):
         self.show_run(agent, run)
 
     def _export_card(self, agent: Agent, run: Run, export_record: dict[str, Any]) -> QFrame:
-        frame, layout = card()
-        frame.setMaximumWidth(480)
         status = str(export_record["status"])
+        complete_card = status in {"complete", "complete_with_warnings"}
+        frame, layout = preferred_width_card(560 if complete_card else 440)
         state = RUN_STATUS_STATE.get(status.casefold(), "neutral")
         export_dir = Path(export_record["path"]) if export_record["path"] else None
         files_missing = export_dir is None or not export_dir.exists()
 
         top = QHBoxLayout()
         title = QLabel(f"Export #{export_record['export_number']:03d}")
-        title.setObjectName("cardTitle")
+        title.setObjectName("exportCardTitle")
         top.addWidget(title)
         top.addStretch()
         badge = ClickableStatusBadge(display_status_text(status), state)
         has_diagnostic_reason = has_actionable_report(status)
         if has_diagnostic_reason and not files_missing:
-            badge.setToolTip("Click for diagnostic details")
+            badge.setToolTip("Diagnostics")
             badge.clicked.connect(
                 lambda _=False, record=export_record: self.show_export_diagnostics(agent, run, record)
             )
         top.addWidget(badge)
         layout.addLayout(top)
-        layout.addWidget(
-            muted(human_date(export_record.get("completed_at") or export_record.get("started_at")))
+        date_text = human_date(
+            export_record.get("completed_at") or export_record.get("started_at")
         )
 
         if files_missing:
+            date = muted(date_text)
+            date.setObjectName("exportMeta")
+            layout.addWidget(date)
             layout.addWidget(muted("Files missing — this export's local folder no longer exists."))
+            layout.addStretch()
             actions = icon_toolbar(
                 (
                     (
                         "workflow",
-                        "View process",
+                        "View Process",
                         lambda _=False, record=export_record: self.open_export_history(
                             agent, run, record
                         ),
@@ -1758,7 +1948,7 @@ class MainWindow(QMainWindow):
             actions.addWidget(
                 icon_action_button(
                     "trash",
-                    "Delete (moves to Recycle Bin)",
+                    "Delete",
                     lambda _=False, record=export_record: self.delete_export_to_recycle_bin(
                         agent, run, record
                     ),
@@ -1769,7 +1959,8 @@ class MainWindow(QMainWindow):
 
         summary = self._read_export_summary(export_record["path"])
         metrics: list[tuple[str, str]] = []
-        if status == "cancelled":
+        duration = self._export_duration_text(export_record)
+        if status in {"cancelled", "failed"}:
             # A cancelled export usually has little or no real data -- show
             # what actually happened (where it stopped) rather than padding
             # the card with meaningless zeroed-out metric tiles.
@@ -1777,50 +1968,54 @@ class MainWindow(QMainWindow):
             if interrupted_stage:
                 metrics.append(("Stage", str(interrupted_stage).replace("_", " ").title()))
             if isinstance(summary.get("interrupted_page"), int):
-                metrics.append(("Page", str(summary["interrupted_page"])))
-            duration = self._export_duration_text(export_record)
-            if duration:
-                metrics.append(("Duration", duration))
+                metrics.append(("Progress", f"Page {summary['interrupted_page']}"))
             if summary.get("videos"):
                 metrics.append(("Videos", f"{summary['videos']:,}"))
+            if duration:
+                date_text = f"{date_text} · {duration}"
         else:
             if summary.get("dataset_bytes"):
                 metrics.append(("AI Dataset", format_bytes(summary["dataset_bytes"])))
             if summary.get("raw_bytes"):
-                metrics.append(("RAW Data", format_bytes(summary["raw_bytes"])))
+                metrics.append(("Raw Data", format_bytes(summary["raw_bytes"])))
             if summary.get("videos"):
                 metrics.append(("Videos", f"{summary['videos']:,}"))
-            if summary.get("warnings"):
-                metrics.append(("Warnings", str(summary["warnings"])))
+            if duration:
+                metrics.append(("Duration", duration))
+            if isinstance(summary.get("high_signal_videos"), int):
+                metrics.append(("High Signal", f"{summary['high_signal_videos']:,}"))
+        date = muted(date_text)
+        date.setObjectName("exportMeta")
+        layout.addWidget(date)
         if not metrics:
             layout.addWidget(muted("No export data produced."))
         else:
             metrics_row = FlowLayout(spacing=8)
             metrics_host = QWidget()
+            metrics_host.setObjectName("flowHost")
             metrics_host.setLayout(metrics_row)
             for label_text, value_text in metrics:
-                metrics_row.addWidget(metric_card(label_text, value_text))
+                metrics_row.addWidget(metric_card(label_text, value_text, compact=True))
             layout.addWidget(metrics_host)
 
+        layout.addStretch()
         actions = icon_toolbar(
             (
                 (
                     "workflow",
-                    "View process",
+                    "View Process",
                     lambda _=False, record=export_record: self.open_export_history(
                         agent, run, record
                     ),
                 ),
                 (
                     "folder",
-                    "Open folder",
+                    "Open Folder",
                     lambda _=False, path=export_record["path"]: open_in_explorer(Path(path)),
                 ),
                 (
-                    "document",
-                    "Open report"
-                    if has_diagnostic_reason
-                    else "No diagnostic report issues for this export.",
+                    "report",
+                    "Report",
                     lambda _=False, record=export_record: self.open_export_report(
                         agent, run, record
                     ),
@@ -1832,7 +2027,7 @@ class MainWindow(QMainWindow):
         actions.addWidget(
             icon_action_button(
                 "trash",
-                "Delete (moves to Recycle Bin)",
+                "Delete",
                 lambda _=False, record=export_record: self.delete_export_to_recycle_bin(
                     agent, run, record
                 ),
@@ -1857,7 +2052,9 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
+        body.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(body)
+        layout.setContentsMargins(0, 0, 18, 0)
         layout.setSpacing(14)
         number = run.local_number or 0
         display_name = self.database.research_display_name(agent.id, run.id)
@@ -1866,61 +2063,63 @@ class MainWindow(QMainWindow):
         title_row = QHBoxLayout()
         title = QLabel(display_name or f"Research #{number:03d}")
         title.setObjectName("title")
+        title.setWordWrap(True)
+        title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         title_row.addWidget(title)
-        title_row.addLayout(
-            icon_toolbar(
-                (
-                    ("pencil", "Rename research", lambda: self.rename_research(agent, run)),
-                    (
-                        "copy",
-                        "Copy Run ID",
-                        lambda: QApplication.clipboard().setText(run.id),
-                    ),
-                    (
-                        "folder",
-                        "Open Export Folder",
-                        lambda: open_in_explorer(Path(self.settings.export_folder)),
-                    ),
-                    (
-                        "trash",
-                        "Hide from Virlo Exporter (local only)",
-                        lambda: self.hide_research_locally(agent, run),
-                    ),
-                )
+        title_row.addWidget(
+            icon_action_button(
+                "pencil", "Rename", lambda: self.rename_research(agent, run)
             )
         )
         title_row.addStretch()
-        status_state = RUN_STATUS_STATE.get(run.status.casefold(), "neutral")
-        title_row.addWidget(status_badge(run.status.replace("_", " "), status_state))
+        title_row.addLayout(
+            icon_toolbar(
+                (
+                    ("copy", "Copy ID", lambda: QApplication.clipboard().setText(run.id)),
+                    (
+                        "folder",
+                        "Open Folder",
+                        lambda: open_in_explorer(Path(self.settings.export_folder)),
+                    ),
+                    ("trash", "Delete", lambda: self.hide_research_locally(agent, run)),
+                )
+            )
+        )
         header_box.addLayout(title_row)
-        if display_name:
-            header_box.addWidget(muted(f"Research #{number:03d} · {agent.name}"))
-        else:
-            header_box.addWidget(muted(agent.name))
-        header_box.addWidget(muted(human_date(run_timestamp(run))))
+        meta_row = QHBoxLayout()
+        context = f"Research #{number:03d} · {agent.name}" if display_name else agent.name
+        meta_row.addWidget(muted(f"{context} · {human_date(run_timestamp(run))}"))
+        meta_row.addStretch()
+        status_state = RUN_STATUS_STATE.get(run.status.casefold(), "neutral")
+        meta_row.addWidget(status_badge(run.status.replace("_", " "), status_state))
+        header_box.addLayout(meta_row)
         layout.addLayout(header_box)
 
         metrics_flow = FlowLayout(spacing=10)
         metrics_host = QWidget()
+        metrics_host.setObjectName("flowHost")
         metrics_host.setLayout(metrics_flow)
         for label_text, value_text in self._run_metrics(run):
             metrics_flow.addWidget(metric_card(label_text, value_text))
         layout.addWidget(metrics_host)
 
         platforms, platforms_layout = card()
+        platforms.setMaximumWidth(780)
+        platforms.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
         platforms_layout.addWidget(card_heading("Platforms"))
-        platform_row = QHBoxLayout()
-        platform_row.setSpacing(6)
-        for label_text, count in self._platform_pills(agent, run):
-            platform_row.addWidget(pill(f"{label_text}   {count:,}" if isinstance(count, int) else label_text))
-        platform_row.addStretch()
+        platform_row = FlowLayout(spacing=8)
+        for label_text, count in self._platform_metrics(agent, run):
+            value_text = f"{count:,}" if isinstance(count, int) else "—"
+            platform_row.addWidget(metric_card(label_text, value_text))
         platform_host = QWidget()
+        platform_host.setObjectName("flowHost")
         platform_host.setLayout(platform_row)
         platforms_layout.addWidget(platform_host)
         layout.addWidget(platforms)
 
         compact_row = FlowLayout(spacing=14)
         compact_host = QWidget()
+        compact_host.setObjectName("flowHost")
         compact_host.setLayout(compact_row)
 
         run_info, run_info_layout = card()
@@ -1943,6 +2142,8 @@ class MainWindow(QMainWindow):
         for field_label, field_value in run_info_fields:
             run_info_grid.addWidget(mini_card(field_label, field_value))
         run_info_grid_host = QWidget()
+        run_info_grid_host.setObjectName("flowHost")
+        run_info_grid_host.setMinimumWidth(280)
         run_info_grid_host.setLayout(run_info_grid)
         run_info_layout.addWidget(run_info_grid_host)
         compact_row.addWidget(run_info)
@@ -1979,6 +2180,8 @@ class MainWindow(QMainWindow):
         for field_label, field_value, field_state in intelligence_fields:
             intelligence_grid.addWidget(mini_card(field_label, field_value, field_state))
         intelligence_grid_host = QWidget()
+        intelligence_grid_host.setObjectName("flowHost")
+        intelligence_grid_host.setMinimumWidth(240)
         intelligence_grid_host.setLayout(intelligence_grid)
         intelligence_layout.addWidget(intelligence_grid_host)
         compact_row.addWidget(intelligence)
@@ -1987,16 +2190,18 @@ class MainWindow(QMainWindow):
         export = QPushButton("Export")
         export.setObjectName("primary")
         export.setMinimumHeight(44)
+        export.setMaximumWidth(220)
         export.setEnabled(run.status in {"completed", "partial_failure"})
         export.clicked.connect(lambda: self.start_export(agent, run))
-        layout.addWidget(export)
+        layout.addWidget(export, alignment=Qt.AlignmentFlag.AlignLeft)
         history = self.database.export_history(agent.id, run.id)
         layout.addWidget(card_heading("Exports"))
         if not history:
             layout.addWidget(muted("No local exports yet."))
         else:
-            exports_flow = FlowLayout(spacing=14)
+            exports_flow = FlowLayout(spacing=14, equal_row_heights=True)
             exports_host = QWidget()
+            exports_host.setObjectName("flowHost")
             exports_host.setLayout(exports_flow)
             for item in history:
                 exports_flow.addWidget(self._export_card(agent, run, item))
